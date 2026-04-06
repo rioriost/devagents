@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from devagents.agents.base import AgentResult
+from devagents.agents.base import AgentResult, AgentTask
 from devagents.orchestration.artifact_writer import WorkflowArtifactWriter
 from devagents.orchestration.edit_phase import EditPhaseOrchestrator
+from devagents.orchestration.orchestrator import Orchestrator
 from devagents.orchestration.workflow import create_workflow_state
 from devagents.runtime.code_editing import CodeEditRequest
 from devagents.runtime.editor import EditRequest
@@ -86,6 +88,17 @@ class DummyCodeEditor:
     def apply(self, request: CodeEditRequest) -> DummyCodeEditResult:
         self.requests.append(request)
         return DummyCodeEditResult(ok=True, changed=True)
+
+
+class DummyAgent:
+    def __init__(self, agent_name: str, result: AgentResult) -> None:
+        self.agent_name = agent_name
+        self.result = result
+        self.calls: list[AgentTask] = []
+
+    async def run(self, task: AgentTask, state: Any) -> AgentResult:
+        self.calls.append(task)
+        return self.result
 
 
 def _build_state() -> Any:
@@ -411,3 +424,83 @@ def test_edit_phase_applies_safe_and_structured_edits_and_records_paths(
     assert "src/devagents/runtime/editor.py" in state.changed_files
     assert "src/devagents/agents/implementation.py" in state.changed_files
     assert any("拒否" in note or "denied" in note for note in state.notes)
+
+
+def test_minimal_orchestrator_completes_and_skips_optional_tasks(
+    tmp_path: Path,
+) -> None:
+    requirements_agent = DummyAgent(
+        "requirements",
+        AgentResult.success(
+            "requirements complete",
+            outputs={"normalized_requirements": {"objective": "x"}},
+        ),
+    )
+    planning_agent = DummyAgent(
+        "planner",
+        AgentResult.success(
+            "planning complete",
+            outputs={"plan": {"phases": ["plan"]}},
+        ),
+    )
+
+    orchestrator = Orchestrator(
+        requirements_agent=requirements_agent,
+        planning_agent=planning_agent,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    state = asyncio.run(orchestrator.run("Build a multi-agent workflow"))
+
+    assert state.phase.value == "completed"
+    assert state.require_task("requirements_analysis").status.value == "completed"
+    assert state.require_task("planning").status.value == "completed"
+    assert state.require_task("implementation").status.value == "skipped"
+    assert state.require_task("test_design").status.value == "skipped"
+    assert state.require_task("test_execution").status.value == "skipped"
+    assert state.require_task("review").status.value == "skipped"
+    assert state.require_task("documentation").status.value == "skipped"
+    assert state.require_task("finalization").status.value == "completed"
+    assert state.require_task("finalization").outputs["next_actions"] == [
+        "Persist final workflow summary",
+        "Review generated artifacts",
+    ]
+    assert requirements_agent.calls
+    assert planning_agent.calls
+
+
+def test_minimal_orchestrator_marks_failure_on_agent_error(
+    tmp_path: Path,
+) -> None:
+    requirements_agent = DummyAgent(
+        "requirements",
+        AgentResult.failure(
+            "requirements failed",
+            outputs={"open_questions": ["missing requirement detail"]},
+        ),
+    )
+    planning_agent = DummyAgent(
+        "planner",
+        AgentResult.success(
+            "planning complete",
+            outputs={"plan": {"phases": ["plan"]}},
+        ),
+    )
+
+    orchestrator = Orchestrator(
+        requirements_agent=requirements_agent,
+        planning_agent=planning_agent,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    state = asyncio.run(orchestrator.run("Build a multi-agent workflow"))
+
+    assert state.phase.value == "failed"
+    assert state.require_task("requirements_analysis").status.value == "failed"
+    assert state.require_task("planning").status.value == "pending"
+    assert any(
+        "requirements_analysis failed: requirements failed" == note
+        for note in state.notes
+    )
+    assert "missing requirement detail" not in state.open_questions
+    assert len(planning_agent.calls) == 0
