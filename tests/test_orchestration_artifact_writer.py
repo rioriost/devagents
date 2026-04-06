@@ -1408,3 +1408,201 @@ def test_build_final_summary_uses_defaults_for_non_list_values_and_missing_actio
     assert "## Acceptance Gate" not in summary
     assert "- Review generated artifacts" in summary
     assert "- Promote approved changes into concrete implementation work" in summary
+
+
+def test_build_approval_risk_summary_ignores_non_dict_results_and_empty_risks(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+    state = build_state()
+    state.add_risk("  ")
+    state.add_risk("dependency additions require explicit human approval")
+
+    summary = writer.build_approval_risk_summary(
+        state=state,
+        results={
+            "requirements_result": None,
+            "planning_result": {
+                "risks": [
+                    "",
+                    "  ",
+                    "security-impacting edits require explicit human approval",
+                ]
+            },
+            "documentation_result": "invalid",
+        },
+    )
+
+    assert summary == {
+        "approval_required": True,
+        "approval_reasons": [
+            "dependency additions require explicit human approval",
+            "security-impacting edits require explicit human approval",
+        ],
+        "risk_register": [
+            "dependency additions require explicit human approval",
+            "security-impacting edits require explicit human approval",
+        ],
+        "operator_visibility": {
+            "phase": state.phase.value,
+            "blocked_tasks": [],
+            "open_questions": [],
+        },
+    }
+
+
+def test_build_change_impact_summary_skips_invalid_slices_and_uses_fix_fallback(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+    state = build_state()
+
+    summary = writer.build_change_impact_summary(
+        state=state,
+        implementation_result=result(
+            outputs={
+                "implementation": {
+                    "code_change_slices": [
+                        {
+                            "goal": "   ",
+                            "targets": ["src/devagents/main.py"],
+                            "depends_on": ["implementation"],
+                        },
+                        {
+                            "goal": "Missing targets",
+                            "targets": [],
+                            "depends_on": ["implementation"],
+                        },
+                    ]
+                }
+            }
+        ),
+        test_design_result=result(outputs={"test_plan": {"test_cases": "invalid"}}),
+        test_execution_result=result(
+            outputs={"test_results": {"status": "passed", "executed_checks": "invalid"}}
+        ),
+        fix_result=result(
+            outputs={
+                "fix_plan": {
+                    "fix_slices": [
+                        {
+                            "goal": "Stabilize artifact writer fallback",
+                            "targets": [
+                                "src/devagents/orchestration/artifact_writer.py"
+                            ],
+                            "depends_on": ["review", "test_execution"],
+                        }
+                    ]
+                }
+            }
+        ),
+    )
+
+    assert summary == [
+        {
+            "changed_files": ["src/devagents/orchestration/artifact_writer.py"],
+            "reason": "Stabilize artifact writer fallback",
+            "impact_scope": ["review", "test_execution"],
+            "test_target": [],
+            "rollback_method": "Revert the affected files to the previous committed versions and re-run the targeted validation flow.",
+        }
+    ]
+
+
+def test_build_rollback_method_handles_empty_and_source_only_paths(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    assert writer._build_rollback_method([]) == "No rollback method recorded."
+    assert (
+        writer._build_rollback_method(["src/devagents/main.py"])
+        == "Revert the affected files to the previous committed versions and re-run the targeted validation flow."
+    )
+
+
+def test_build_failure_report_returns_none_without_failed_steps_and_normalizes_actions(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    assert (
+        writer._build_failure_report(
+            {
+                "requirements_result": {"status": "completed"},
+                "planning_result": None,
+                "review_result": "invalid",
+            }
+        )
+        is None
+    )
+
+    failure_report = writer._build_failure_report(
+        {
+            "planning_result": {
+                "status": "failed",
+                "summary": "planning failed",
+                "failure_category": "design_inconsistency",
+                "failure_cause": "architecture decision is still unresolved",
+                "next_actions": ["retry planning", "", "  ", "record decision"],
+            }
+        }
+    )
+
+    assert failure_report == {
+        "failed_step_count": 1,
+        "primary_failure": {
+            "result": "planning_result",
+            "summary": "planning failed",
+            "failure_category": "design_inconsistency",
+            "failure_cause": "architecture decision is still unresolved",
+            "next_actions": ["retry planning", "record decision"],
+        },
+        "failed_steps": [
+            {
+                "result": "planning_result",
+                "summary": "planning failed",
+                "failure_category": "design_inconsistency",
+                "failure_cause": "architecture decision is still unresolved",
+                "next_actions": ["retry planning", "record decision"],
+            }
+        ],
+        "next_actions": ["retry planning", "record decision"],
+        "operator_summary": "planning failed",
+        "operator_visibility": {
+            "has_failures": True,
+            "primary_result": "planning_result",
+            "primary_failure_category": "design_inconsistency",
+            "primary_failure_cause": "architecture decision is still unresolved",
+            "recommended_next_actions": ["retry planning", "record decision"],
+        },
+    }
+
+
+def test_format_list_or_none_returns_none_for_blank_only_values(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    assert writer._format_list_or_none(["", "   "]) == "none"
+    assert writer._format_list_or_none("invalid") == "none"
