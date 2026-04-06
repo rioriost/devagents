@@ -32,16 +32,20 @@ def normalize_edit_payloads(value: Any) -> list[dict[str, str]]:
         target_symbol = str(item.get("target_symbol", "")).strip()
         intent = str(item.get("intent", "")).strip()
 
-        if not edit_kind or not target_symbol or not intent:
+        if not edit_kind or not intent:
             continue
 
-        normalized.append(
-            {
-                "edit_kind": edit_kind,
-                "target_symbol": target_symbol,
-                "intent": intent,
-            }
-        )
+        if edit_kind == "replace_block" and not target_symbol:
+            continue
+
+        normalized_item = {
+            "edit_kind": edit_kind,
+            "intent": intent,
+        }
+        if target_symbol:
+            normalized_item["target_symbol"] = target_symbol
+
+        normalized.append(normalized_item)
 
     return normalized
 
