@@ -438,16 +438,36 @@ class WorkflowArtifactWriter:
         if result is None:
             return None
 
+        summary = str(result.summary).strip()
+        if not summary:
+            summary = "No summary provided."
+
+        failure_category = (
+            str(result.failure_category).strip()
+            if isinstance(result.failure_category, str)
+            else ""
+        )
+        failure_cause = (
+            str(result.failure_cause).strip()
+            if isinstance(result.failure_cause, str)
+            else ""
+        )
+        if result.status == "failed":
+            if not failure_category:
+                failure_category = "unknown_failure"
+            if not failure_cause:
+                failure_cause = "No failure cause provided."
+
         return {
             "status": result.status,
-            "summary": result.summary,
+            "summary": summary,
             "outputs": result.outputs,
-            "artifacts": list(result.artifacts),
-            "next_actions": list(result.next_actions),
-            "risks": list(result.risks),
+            "artifacts": self._normalize_list(result.artifacts),
+            "next_actions": self._normalize_list(result.next_actions),
+            "risks": self._normalize_list(result.risks),
             "metrics": dict(result.metrics),
-            "failure_category": result.failure_category,
-            "failure_cause": result.failure_cause,
+            "failure_category": failure_category or None,
+            "failure_cause": failure_cause or None,
         }
 
     def build_change_impact_summary(
@@ -561,7 +581,16 @@ class WorkflowArtifactWriter:
     def _normalize_list(self, value: Any) -> list[str]:
         if not isinstance(value, list):
             return []
-        return [str(item).strip() for item in value if str(item).strip()]
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            normalized_item = str(item).strip()
+            if not normalized_item or normalized_item in seen:
+                continue
+            normalized.append(normalized_item)
+            seen.add(normalized_item)
+        return normalized
 
     def _normalize_dict_list(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):

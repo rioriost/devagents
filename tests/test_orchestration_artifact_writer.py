@@ -159,6 +159,98 @@ def make_failure_result(
     )
 
 
+def test_result_to_dict_normalizes_blank_failure_summary(tmp_path: Path) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    failure_result = make_failure_result(
+        summary=" \n\t ",
+        outputs={"review": {"severity": "high"}},
+        next_actions=["address review findings"],
+        failure_category="validation",
+        failure_cause="missing required summary",
+    )
+
+    assert writer.result_to_dict(failure_result) == {
+        "status": "failed",
+        "summary": "No summary provided.",
+        "outputs": {"review": {"severity": "high"}},
+        "artifacts": [],
+        "next_actions": ["address review findings"],
+        "risks": [],
+        "metrics": {},
+        "failure_category": "validation",
+        "failure_cause": "missing required summary",
+    }
+
+
+def test_result_to_dict_fills_required_failure_fields_when_blank(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    failure_result = make_failure_result(
+        summary="planning failed",
+        outputs={"review": {"severity": "high"}},
+        next_actions=["address review findings"],
+        failure_category=" \n ",
+        failure_cause="",
+    )
+
+    assert writer.result_to_dict(failure_result) == {
+        "status": "failed",
+        "summary": "planning failed",
+        "outputs": {"review": {"severity": "high"}},
+        "artifacts": [],
+        "next_actions": ["address review findings"],
+        "risks": [],
+        "metrics": {},
+        "failure_category": "unknown_failure",
+        "failure_cause": "No failure cause provided.",
+    }
+
+
+def test_result_to_dict_uses_pre_normalized_agent_result_fields(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    normalized_result = AgentResult(
+        status=" completed ",
+        summary=" \n ",
+        outputs={"review": {"severity": "low"}},
+        artifacts=["docs/design.md", " ", "docs/design.md", "docs/runbook.md"],
+        next_actions=["save docs", "", "review output", "review output"],
+        risks=["schema drift", " ", "schema drift", "missing field"],
+        metrics={"count": 2},
+        failure_category=" \n ",
+        failure_cause="",
+    )
+
+    assert writer.result_to_dict(normalized_result) == {
+        "status": "completed",
+        "summary": "No summary provided.",
+        "outputs": {"review": {"severity": "low"}},
+        "artifacts": ["docs/design.md", "docs/runbook.md"],
+        "next_actions": ["save docs", "review output"],
+        "risks": ["schema drift", "missing field"],
+        "metrics": {"count": 2},
+        "failure_category": None,
+        "failure_cause": None,
+    }
+
+
 def test_build_run_summary_payload_and_result_to_dict_handle_optional_fix_result(
     tmp_path: Path,
 ) -> None:
@@ -216,6 +308,79 @@ def test_build_run_summary_payload_and_result_to_dict_handle_optional_fix_result
     assert payload["results"]["requirements_result"]["status"] == "completed"
     assert payload["results"]["fix_result"] is None
     assert writer.result_to_dict(None) is None
+
+    noisy_result = AgentResult.success(
+        "normalized",
+        artifacts=["docs/design.md", " ", "", "docs/runbook.md"],
+        next_actions=["save docs", "", "review output", "  "],
+        risks=["schema drift", "", "schema drift", "  ", "missing field"],
+    )
+
+    assert writer.result_to_dict(noisy_result) == {
+        "status": "completed",
+        "summary": "normalized",
+        "outputs": {},
+        "artifacts": ["docs/design.md", "docs/runbook.md"],
+        "next_actions": ["save docs", "review output"],
+        "risks": ["schema drift", "missing field"],
+        "metrics": {},
+        "failure_category": None,
+        "failure_cause": None,
+    }
+
+    missing_summary_result = AgentResult.success(
+        "   ",
+        artifacts=["docs/design.md"],
+        next_actions=["review output"],
+    )
+
+    assert writer.result_to_dict(missing_summary_result) == {
+        "status": "completed",
+        "summary": "No summary provided.",
+        "outputs": {},
+        "artifacts": ["docs/design.md"],
+        "next_actions": ["review output"],
+        "risks": [],
+        "metrics": {},
+        "failure_category": None,
+        "failure_cause": None,
+    }
+
+
+def test_result_to_dict_deduplicates_large_repeated_artifact_lists(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    repeated_artifacts = ["docs/design.md"] * 40 + ["docs/runbook.md"] * 35
+    repeated_artifacts.extend(["", "   ", "artifacts/run-summary.json"] * 20)
+
+    noisy_result = AgentResult.success(
+        "normalized",
+        artifacts=repeated_artifacts,
+        next_actions=["save docs", "save docs", "", "review output", "review output"],
+        risks=["schema drift", "schema drift", "", "missing field", "missing field"],
+    )
+
+    assert writer.result_to_dict(noisy_result) == {
+        "status": "completed",
+        "summary": "normalized",
+        "outputs": {},
+        "artifacts": [
+            "docs/design.md",
+            "docs/runbook.md",
+            "artifacts/run-summary.json",
+        ],
+        "next_actions": ["save docs", "review output"],
+        "risks": ["schema drift", "missing field"],
+        "metrics": {},
+        "failure_category": None,
+        "failure_cause": None,
+    }
 
 
 def test_build_run_summary_payload_includes_change_impact_summary_from_slices(
@@ -596,6 +761,73 @@ def test_build_run_summary_payload_includes_failure_report_and_primary_next_acti
         "Clarify the architecture decision",
         "Retry planning with the chosen direction",
     ]
+
+
+def test_build_run_summary_payload_fills_missing_failed_required_fields(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+    state = build_state()
+
+    requirements_result = result(
+        outputs={"normalized_requirements": {"objective": "x"}}
+    )
+    planning_result = make_failure_result(
+        summary="planning failed",
+        outputs={"open_questions": ["Need architecture decision"]},
+        next_actions=["Clarify the architecture decision"],
+        failure_category=" ",
+        failure_cause=" \n ",
+    )
+    documentation_result = result(outputs={"design_document": "# Design\n"})
+    implementation_result = result(outputs={"implementation": {"change_slices": []}})
+    test_design_result = result(outputs={"test_plan": {"test_cases": ["case-1"]}})
+    test_execution_result = result(
+        outputs={"test_results": {"status": "skipped", "executed_checks": []}}
+    )
+    review_result = result(
+        outputs={
+            "review": {
+                "severity": "unknown",
+                "unresolved_issues": [],
+                "fix_loop_required": False,
+            }
+        }
+    )
+    snapshot = DummySessionSnapshot(session_id="sess-test-001", token_usage_ratio=0.2)
+
+    payload = writer.build_run_summary_payload(
+        state=state,
+        requirement=state.requirement,
+        requirements_result=requirements_result,
+        planning_result=planning_result,
+        documentation_result=documentation_result,
+        implementation_result=implementation_result,
+        test_design_result=test_design_result,
+        test_execution_result=test_execution_result,
+        review_result=review_result,
+        fix_result=None,
+        session_snapshot=snapshot,
+    )
+
+    assert (
+        payload["results"]["planning_result"]["failure_category"] == "unknown_failure"
+    )
+    assert (
+        payload["results"]["planning_result"]["failure_cause"]
+        == "No failure cause provided."
+    )
+    assert payload["failure_report"]["primary_failure"] == {
+        "result": "planning_result",
+        "summary": "planning failed",
+        "failure_category": "unknown_failure",
+        "failure_cause": "No failure cause provided.",
+        "next_actions": ["Clarify the architecture decision"],
+    }
 
 
 def test_build_acceptance_gate_reports_ready_for_completion_when_all_checks_pass(
