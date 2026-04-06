@@ -32,6 +32,23 @@ class AgentResult:
     failure_category: str | None = None
     failure_cause: str | None = None
 
+    def __post_init__(self) -> None:
+        self.status = str(self.status).strip()
+        self.summary = self._normalize_summary(self.summary)
+        self.outputs = self._normalize_mapping(self.outputs)
+        self.artifacts = self._normalize_string_list(self.artifacts)
+        self.next_actions = self._normalize_string_list(self.next_actions)
+        self.risks = self._normalize_string_list(self.risks)
+        self.metrics = self._normalize_mapping(self.metrics)
+        self.failure_category = self._normalize_optional_string(self.failure_category)
+        self.failure_cause = self._normalize_optional_string(self.failure_cause)
+
+        if self.status == "failed":
+            if self.failure_category is None:
+                self.failure_category = "unknown_failure"
+            if self.failure_cause is None:
+                self.failure_cause = "No failure cause provided."
+
     @property
     def is_success(self) -> bool:
         return self.status in {"completed", "success"}
@@ -83,6 +100,28 @@ class AgentResult:
             failure_category=failure_category,
             failure_cause=failure_cause,
         )
+
+    @staticmethod
+    def _normalize_summary(value: Any) -> str:
+        summary = str(value).strip()
+        return summary or "No summary provided."
+
+    @staticmethod
+    def _normalize_mapping(value: Any) -> dict[str, Any]:
+        return dict(value) if isinstance(value, Mapping) else {}
+
+    @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    @staticmethod
+    def _normalize_optional_string(value: Any) -> str | None:
+        if not isinstance(value, str):
+            return None
+        normalized = value.strip()
+        return normalized or None
 
 
 class BaseAgent(ABC):

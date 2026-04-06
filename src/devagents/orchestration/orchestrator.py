@@ -202,7 +202,18 @@ class Orchestrator:
                 "metadata_keys": sorted(task.metadata.keys()),
             },
         )
-        return await agent.run(task, state)
+        result = await agent.run(task, state)
+        return AgentResult(
+            status=result.status,
+            summary=result.summary,
+            outputs=result.outputs,
+            artifacts=result.artifacts,
+            next_actions=result.next_actions,
+            risks=result.risks,
+            metrics=result.metrics,
+            failure_category=result.failure_category,
+            failure_cause=result.failure_cause,
+        )
 
     def collect_results(self, state: WorkflowState) -> dict[str, Any]:
         """Collect a compact workflow summary."""

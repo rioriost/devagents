@@ -38,7 +38,7 @@ def test_dispatch_returns_agent_result_and_passes_task_and_state() -> None:
 
     dispatched = asyncio.run(orchestrator.dispatch(agent, task, state))
 
-    assert dispatched is result
+    assert dispatched == result
     assert len(agent.calls) == 1
     assert agent.calls[0].name == "requirements_analysis"
     assert agent.calls[0].inputs == {"requirement": "Build a multi-agent workflow"}
@@ -172,8 +172,92 @@ def test_apply_result_failure_uses_unknown_failure_when_summary_empty() -> None:
 
     assert state.phase == WorkflowPhase.FAILED
     assert state.require_task("planning").status == TaskStatus.FAILED
-    assert state.notes[-1] == "planning failed: unknown failure"
+    assert state.notes[-1] == "planning failed: No summary provided."
     assert state.open_questions == []
+
+
+def test_dispatch_normalizes_blank_and_noisy_agent_result_fields() -> None:
+    state = make_state()
+    raw_result = AgentResult(
+        status=" completed ",
+        summary=" \n ",
+        outputs={"normalized_requirements": {"objective": "x"}},
+        artifacts=["artifacts/reqs.md", " ", "artifacts/reqs.md"],
+        next_actions=["review output", "", "review output"],
+        risks=["risk-a", " ", "risk-a"],
+        metrics={"count": 1},
+        failure_category=" \n ",
+        failure_cause="",
+    )
+    agent = DummyAgent("requirements", raw_result)
+    orchestrator = Orchestrator(
+        requirements_agent=agent,
+        planning_agent=DummyAgent("planner", AgentResult.success("unused")),
+    )
+
+    result = asyncio.run(
+        orchestrator.dispatch(
+            agent,
+            AgentTask(
+                name="requirements_analysis",
+                objective="Normalize the incoming requirement",
+                inputs={"requirement": "Build a workflow"},
+            ),
+            state,
+        )
+    )
+
+    assert result.status == "completed"
+    assert result.summary == "No summary provided."
+    assert result.outputs == {"normalized_requirements": {"objective": "x"}}
+    assert result.artifacts == ["artifacts/reqs.md", "artifacts/reqs.md"]
+    assert result.next_actions == ["review output", "review output"]
+    assert result.risks == ["risk-a", "risk-a"]
+    assert result.metrics == {"count": 1}
+    assert result.failure_category is None
+    assert result.failure_cause is None
+    assert len(agent.calls) == 1
+
+
+def test_dispatch_fills_required_failed_result_fields() -> None:
+    state = make_state()
+    raw_result = AgentResult(
+        status="failed",
+        summary="",
+        outputs={"open_questions": ["Need API auth"]},
+        artifacts=[" ", "artifacts/failure.md"],
+        next_actions=["retry planning", ""],
+        risks=["schema drift", ""],
+        metrics={},
+        failure_category=" \t ",
+        failure_cause=" \n ",
+    )
+    agent = DummyAgent("planner", raw_result)
+    orchestrator = Orchestrator(
+        requirements_agent=DummyAgent("requirements", AgentResult.success("unused")),
+        planning_agent=agent,
+    )
+
+    result = asyncio.run(
+        orchestrator.dispatch(
+            agent,
+            AgentTask(
+                name="planning",
+                objective="Create an implementation plan",
+                inputs={"requirement": "Build a workflow"},
+            ),
+            state,
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.summary == "No summary provided."
+    assert result.artifacts == ["artifacts/failure.md"]
+    assert result.next_actions == ["retry planning"]
+    assert result.risks == ["schema drift"]
+    assert result.failure_category == "unknown_failure"
+    assert result.failure_cause == "No failure cause provided."
+    assert len(agent.calls) == 1
 
 
 def test_finalize_success_marks_pending_dependency_tasks_as_skipped() -> None:
