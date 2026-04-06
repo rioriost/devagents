@@ -34,7 +34,11 @@ from devagents.runtime.code_editing import (
     StructuredCodeEditor,
     approve_src_devagents_only,
 )
-from devagents.runtime.copilot_client import CopilotClient, CopilotTaskType
+from devagents.runtime.copilot_client import (
+    CopilotClient,
+    CopilotRequest,
+    CopilotTaskType,
+)
 from devagents.runtime.editor import (
     EditOperationKind,
     EditorPolicy,
@@ -152,6 +156,33 @@ class SkeletonOrchestrator:
         )
         if not test_execution_result.is_success:
             return state
+
+        self._rotate_session_if_needed(
+            state,
+            token_usage_ratio=token_usage_ratio,
+            next_action="Resume review after test_execution",
+            last_checkpoint=WorkflowPhase.TESTING.value,
+            persistent_context={
+                "workflow_id": state.workflow_id,
+                "phase": state.phase.value,
+                "requirement": state.requirement,
+                "normalized_requirements": requirements_result.outputs.get(
+                    "normalized_requirements",
+                    {},
+                ),
+                "plan": planning_result.outputs.get("plan", {}),
+                "documentation_bundle": documentation_result.outputs.get(
+                    "documentation_bundle",
+                    {},
+                ),
+                "implementation": implementation_result.outputs.get(
+                    "implementation",
+                    {},
+                ),
+                "test_plan": test_design_result.outputs.get("test_plan", {}),
+                "test_results": test_execution_result.outputs.get("test_results", {}),
+            },
+        )
 
         review_result = await self._run_review_phase(
             state,
@@ -680,29 +711,30 @@ class SkeletonOrchestrator:
         task.add_note(f"selected_model={routing_decision.selected_model}")
         task.add_note(f"routing_reason={routing_decision.reason}")
 
-        copilot_response = await self.copilot_client.generate_text(
-            prompt=f"{normalized_requirements}\n\n{plan}\n\n{implementation}\n\n{test_plan}",
-            system_prompt=(
-                "Generate a concise test execution report, including executed checks, "
-                "provisional status, and unresolved validation concerns."
-            ),
-            model=routing_decision.selected_model,
-            task_type=CopilotTaskType.TEST_EXECUTION,
-            session_id=state.session_id,
-            workflow_id=state.workflow_id,
-            persistent_context={
-                "workflow_id": state.workflow_id,
-                "phase": state.phase.value,
-                "requirement": state.requirement,
-                "normalized_requirements": normalized_requirements,
-                "plan": plan,
-                "implementation": implementation,
-                "test_plan": test_plan,
-            },
-            metadata={
-                "task_id": task.task_id,
-                "routing_decision": routing_decision.to_dict(),
-            },
+        copilot_response = await self.copilot_client.generate(
+            self._build_copilot_request(
+                state=state,
+                prompt=f"{normalized_requirements}\n\n{plan}\n\n{implementation}\n\n{test_plan}",
+                system_prompt=(
+                    "Generate a concise test execution report, including executed checks, "
+                    "provisional status, and unresolved validation concerns."
+                ),
+                model=routing_decision.selected_model,
+                task_type=CopilotTaskType.TEST_EXECUTION,
+                persistent_context={
+                    "workflow_id": state.workflow_id,
+                    "phase": state.phase.value,
+                    "requirement": state.requirement,
+                    "normalized_requirements": normalized_requirements,
+                    "plan": plan,
+                    "implementation": implementation,
+                    "test_plan": test_plan,
+                },
+                metadata={
+                    "task_id": task.task_id,
+                    "routing_decision": routing_decision.to_dict(),
+                },
+            )
         )
 
         result = await self.test_execution_agent.run(
@@ -787,34 +819,35 @@ class SkeletonOrchestrator:
         task.add_note(f"selected_model={routing_decision.selected_model}")
         task.add_note(f"routing_reason={routing_decision.reason}")
 
-        copilot_response = await self.copilot_client.generate_text(
-            prompt=(
-                f"{normalized_requirements}\n\n{plan}\n\n{documentation_bundle}\n\n"
-                f"{implementation}\n\n{test_plan}\n\n{test_results}"
-            ),
-            system_prompt=(
-                "Review the generated workflow outputs, identify unresolved issues, "
-                "and produce a concise review report with recommendations."
-            ),
-            model=routing_decision.selected_model,
-            task_type=CopilotTaskType.REVIEW,
-            session_id=state.session_id,
-            workflow_id=state.workflow_id,
-            persistent_context={
-                "workflow_id": state.workflow_id,
-                "phase": state.phase.value,
-                "requirement": state.requirement,
-                "normalized_requirements": normalized_requirements,
-                "plan": plan,
-                "documentation_bundle": documentation_bundle,
-                "implementation": implementation,
-                "test_plan": test_plan,
-                "test_results": test_results,
-            },
-            metadata={
-                "task_id": task.task_id,
-                "routing_decision": routing_decision.to_dict(),
-            },
+        copilot_response = await self.copilot_client.generate(
+            self._build_copilot_request(
+                state=state,
+                prompt=(
+                    f"{normalized_requirements}\n\n{plan}\n\n{documentation_bundle}\n\n"
+                    f"{implementation}\n\n{test_plan}\n\n{test_results}"
+                ),
+                system_prompt=(
+                    "Review the generated workflow outputs, identify unresolved issues, "
+                    "and produce a concise review report with recommendations."
+                ),
+                model=routing_decision.selected_model,
+                task_type=CopilotTaskType.REVIEW,
+                persistent_context={
+                    "workflow_id": state.workflow_id,
+                    "phase": state.phase.value,
+                    "requirement": state.requirement,
+                    "normalized_requirements": normalized_requirements,
+                    "plan": plan,
+                    "documentation_bundle": documentation_bundle,
+                    "implementation": implementation,
+                    "test_plan": test_plan,
+                    "test_results": test_results,
+                },
+                metadata={
+                    "task_id": task.task_id,
+                    "routing_decision": routing_decision.to_dict(),
+                },
+            )
         )
 
         result = await self.review_agent.run(
@@ -965,35 +998,36 @@ class SkeletonOrchestrator:
         )
         state.model = routing_decision.selected_model
 
-        copilot_response = await self.copilot_client.generate_text(
-            prompt=(
-                f"{normalized_requirements}\n\n{plan}\n\n{documentation_bundle}\n\n"
-                f"{implementation}\n\n{test_plan}\n\n{test_results}\n\n{review}"
-            ),
-            system_prompt=(
-                "Generate a focused fix proposal from the review findings and test "
-                "results. Keep the fix slices small and include revalidation steps."
-            ),
-            model=routing_decision.selected_model,
-            task_type=CopilotTaskType.FIX,
-            session_id=state.session_id,
-            workflow_id=state.workflow_id,
-            persistent_context={
-                "workflow_id": state.workflow_id,
-                "phase": state.phase.value,
-                "requirement": state.requirement,
-                "normalized_requirements": normalized_requirements,
-                "plan": plan,
-                "documentation_bundle": documentation_bundle,
-                "implementation": implementation,
-                "test_plan": test_plan,
-                "test_results": test_results,
-                "review": review,
-            },
-            metadata={
-                "task_id": "fix",
-                "routing_decision": routing_decision.to_dict(),
-            },
+        copilot_response = await self.copilot_client.generate(
+            self._build_copilot_request(
+                state=state,
+                prompt=(
+                    f"{normalized_requirements}\n\n{plan}\n\n{documentation_bundle}\n\n"
+                    f"{implementation}\n\n{test_plan}\n\n{test_results}\n\n{review}"
+                ),
+                system_prompt=(
+                    "Generate a focused fix proposal from the review findings and test "
+                    "results. Keep the fix slices small and include revalidation steps."
+                ),
+                model=routing_decision.selected_model,
+                task_type=CopilotTaskType.FIX,
+                persistent_context={
+                    "workflow_id": state.workflow_id,
+                    "phase": state.phase.value,
+                    "requirement": state.requirement,
+                    "normalized_requirements": normalized_requirements,
+                    "plan": plan,
+                    "documentation_bundle": documentation_bundle,
+                    "implementation": implementation,
+                    "test_plan": test_plan,
+                    "test_results": test_results,
+                    "review": review,
+                },
+                metadata={
+                    "task_id": "fix",
+                    "routing_decision": routing_decision.to_dict(),
+                },
+            )
         )
 
         result = await self.fixer_agent.run(
@@ -1030,6 +1064,74 @@ class SkeletonOrchestrator:
             state.add_note("fix proposal を生成した。")
 
         return result
+
+    def _rotate_session_if_needed(
+        self,
+        state: WorkflowState,
+        *,
+        token_usage_ratio: float,
+        next_action: str,
+        last_checkpoint: str,
+        persistent_context: dict[str, Any],
+    ) -> None:
+        decision, snapshot = self.session_manager.rotate_session(
+            state,
+            token_usage_ratio=token_usage_ratio,
+            next_action=next_action,
+            last_checkpoint=last_checkpoint,
+            persistent_context=persistent_context,
+        )
+        if decision.should_rotate:
+            previous_session_id = snapshot.session_id
+            previous_snapshot_path = self.state_store.save_session_snapshot(snapshot)
+            state.add_note(
+                "mid-run session rotation を実行し、後続フェーズを新 session で継続する。"
+            )
+            state.add_artifact(previous_snapshot_path.as_posix())
+            state.add_note(
+                f"pre-rotation session snapshot を保存した: {previous_session_id}"
+            )
+
+    def _build_copilot_request(
+        self,
+        *,
+        state: WorkflowState,
+        prompt: str,
+        system_prompt: str,
+        model: str,
+        task_type: CopilotTaskType,
+        persistent_context: dict[str, Any],
+        metadata: dict[str, Any],
+    ) -> CopilotRequest:
+        if state.parent_session_id:
+            snapshot = self.session_manager.snapshot_context(
+                state,
+                next_action=f"Resume {task_type.value}",
+                last_checkpoint=state.phase.value,
+                persistent_context=persistent_context,
+            )
+            resume_prompt = self.session_manager.build_resume_prompt(snapshot)
+            return self.copilot_client.build_resume_request(
+                prompt=prompt,
+                resume_prompt=resume_prompt,
+                task_type=task_type,
+                session_id=state.session_id,
+                workflow_id=state.workflow_id,
+                persistent_context=persistent_context,
+                model=model,
+                metadata=metadata,
+            )
+
+        return CopilotRequest(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=model,
+            task_type=task_type,
+            session_id=state.session_id,
+            workflow_id=state.workflow_id,
+            persistent_context=dict(persistent_context),
+            metadata=dict(metadata),
+        )
 
     def _apply_result(
         self,
