@@ -20,6 +20,7 @@ class TestExecutionAgent(BaseAgent):
         plan = self._as_dict(task.inputs.get("plan", {}))
         implementation = self._as_dict(task.inputs.get("implementation", {}))
         test_plan = self._as_dict(task.inputs.get("test_plan", {}))
+        execution_artifacts = self._as_dict(task.inputs.get("execution_artifacts", {}))
         copilot_response = str(task.inputs.get("copilot_response", "")).strip()
 
         objective = str(
@@ -40,6 +41,8 @@ class TestExecutionAgent(BaseAgent):
         test_cases = self._normalize_dict_list(test_plan.get("test_cases"))
         validation_steps = self._normalize_list(test_plan.get("validation_steps"))
         plan_phases = self._normalize_list(plan.get("phases"))
+        failure_summary = self._build_failure_summary(execution_artifacts)
+        log_summary = self._build_log_summary(execution_artifacts)
 
         executed_checks = self._build_executed_checks(
             test_cases=test_cases,
@@ -50,6 +53,7 @@ class TestExecutionAgent(BaseAgent):
             executed_checks=executed_checks,
             open_questions=open_questions,
             resolved_decisions=resolved_decisions,
+            failure_summary=failure_summary,
         )
         test_results_document = self._build_test_results_document(
             objective=objective,
@@ -58,17 +62,21 @@ class TestExecutionAgent(BaseAgent):
             executed_checks=executed_checks,
             open_questions=open_questions,
             resolved_decisions=resolved_decisions,
+            failure_summary=failure_summary,
+            log_summary=log_summary,
             copilot_response=copilot_response,
         )
 
         outputs = {
             "test_results": {
                 "summary": summary,
-                "status": "provisional_passed",
+                "status": "failed" if failure_summary else "provisional_passed",
                 "executed_checks": executed_checks,
                 "open_questions": open_questions,
                 "resolved_decisions": resolved_decisions,
                 "acceptance_criteria": acceptance_criteria,
+                "failure_summary": failure_summary,
+                "log_summary": log_summary,
             },
             "test_results_document": test_results_document,
             "test_result_targets": [
@@ -89,6 +97,10 @@ class TestExecutionAgent(BaseAgent):
         if not code_change_slices:
             risks.append(
                 "実装変更スライスが不足しているため、変更影響に対する検証網羅性が限定的"
+            )
+        if failure_summary:
+            risks.append(
+                "テスト失敗サマリが記録されているため、fix loop または再実行による解消確認が必要"
             )
 
         return AgentResult.success(
@@ -176,11 +188,18 @@ class TestExecutionAgent(BaseAgent):
         executed_checks: list[dict[str, Any]],
         open_questions: list[str],
         resolved_decisions: list[str],
+        failure_summary: list[dict[str, str]],
     ) -> str:
         passed_count = sum(
             1 for item in executed_checks if str(item.get("status")) == "passed"
         )
         total_count = len(executed_checks)
+
+        if failure_summary:
+            return (
+                f"{passed_count}/{total_count} checks were recorded, "
+                f"with {len(failure_summary)} failure summaries requiring follow-up."
+            )
 
         if open_questions and not resolved_decisions:
             return (
@@ -199,6 +218,8 @@ class TestExecutionAgent(BaseAgent):
         executed_checks: list[dict[str, Any]],
         open_questions: list[str],
         resolved_decisions: list[str],
+        failure_summary: list[dict[str, str]],
+        log_summary: list[str],
         copilot_response: str,
     ) -> str:
         lines: list[str] = [
@@ -224,6 +245,22 @@ class TestExecutionAgent(BaseAgent):
             ]
         )
         lines.extend(self._render_checks(executed_checks))
+        if failure_summary:
+            lines.extend(
+                [
+                    "",
+                    "## Failure Summary",
+                ]
+            )
+            lines.extend(self._render_failure_summary(failure_summary))
+        if log_summary:
+            lines.extend(
+                [
+                    "",
+                    "## Log Summary",
+                ]
+            )
+            lines.extend(self._render_bullets(log_summary))
         if resolved_decisions:
             lines.extend(
                 [
@@ -269,6 +306,22 @@ class TestExecutionAgent(BaseAgent):
             return ["- none"]
         return [f"- {item}" for item in items]
 
+    def _render_failure_summary(self, items: list[dict[str, str]]) -> list[str]:
+        if not items:
+            return ["- none"]
+
+        lines: list[str] = []
+        for item in items:
+            check_id = str(item.get("check_id", "unknown")).strip() or "unknown"
+            summary = str(item.get("summary", "")).strip() or "No summary provided."
+            lines.append(f"- {check_id}: {summary}")
+
+            details = str(item.get("details", "")).strip()
+            if details:
+                lines.append(f"  - {details}")
+
+        return lines
+
     def _render_numbered(self, items: list[str]) -> list[str]:
         if not items:
             return ["1. none"]
@@ -278,6 +331,34 @@ class TestExecutionAgent(BaseAgent):
         if not isinstance(value, list):
             return []
         return [str(item).strip() for item in value if str(item).strip()]
+
+    def _build_failure_summary(
+        self, execution_artifacts: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        failures = self._normalize_dict_list(execution_artifacts.get("failures"))
+        summary: list[dict[str, str]] = []
+
+        for index, item in enumerate(failures, start=1):
+            check_id = str(item.get("check_id", f"failure-{index}")).strip()
+            failure_summary = str(item.get("summary", "")).strip()
+            details = str(item.get("details", "")).strip()
+
+            if not failure_summary and not details:
+                continue
+
+            summary.append(
+                {
+                    "check_id": check_id or f"failure-{index}",
+                    "summary": failure_summary
+                    or "Failure recorded during test execution.",
+                    "details": details,
+                }
+            )
+
+        return summary
+
+    def _build_log_summary(self, execution_artifacts: dict[str, Any]) -> list[str]:
+        return self._normalize_list(execution_artifacts.get("log_summary"))
 
     def _normalize_dict_list(self, value: Any) -> list[dict[str, Any]]:
         if not isinstance(value, list):

@@ -202,10 +202,75 @@ def test_reviewer_run_marks_fix_loop_and_collects_unresolved_issues() -> None:
     assert "Fallback objective from workflow state" in report
     assert "## Open Questions" in report
     assert "- Should this be gated?" in report
+    assert "## Recommendations" in report
+    assert "- open questions を解消してから実コード変更に進む" in report
+    assert "- test_results の未解決項目を fix loop に送り、再テストする" in report
+    assert "## Risks" in report
+    assert "- レビューで未解決事項が残っているため、実装完了判定は保留" in report
+    assert "- warning 以上のレビュー結果のため、fix loop が必要" in report
     assert "- required: yes" in report
     assert "## Fix Targets" in report
     assert "`issue-1` [review]" in report
     assert "No additional Copilot draft content was provided." in report
+
+
+def test_reviewer_run_failure_reporting_keeps_recommendations_and_risks_visible() -> (
+    None
+):
+    agent = ReviewAgent()
+    state = _build_state("Review failure visibility")
+    task = _build_task(
+        {
+            "normalized_requirements": {
+                "objective": "Review failure visibility",
+                "acceptance_criteria": ["Failure causes are visible"],
+                "constraints": ["Keep reporting concise"],
+                "open_questions": ["Who approves the retry?"],
+                "resolved_decisions": [],
+            },
+            "plan": {
+                "task_breakdown": [
+                    {"task": "review"},
+                    {"task": "fix"},
+                ]
+            },
+            "documentation_bundle": {
+                "design": "# Design\n",
+            },
+            "implementation": {
+                "strategy": "Keep failure reporting explicit.",
+                "code_change_slices": [],
+            },
+            "test_plan": {
+                "test_cases": ["failure reporting path"],
+            },
+            "test_results": {
+                "status": "failed",
+            },
+            "copilot_response": "Highlight the blocking issues and next actions.",
+        }
+    )
+
+    result = asyncio.run(agent.run(task, state))
+
+    assert result.is_success is True
+    assert result.outputs["review"]["fix_loop_required"] is True
+    assert result.outputs["review"]["severity"] == "needs_follow_up"
+    assert result.next_actions[0] == "open questions を解消してから実コード変更に進む"
+    assert (
+        "test_results の未解決項目を fix loop に送り、再テストする"
+        in result.next_actions
+    )
+    assert "warning 以上のレビュー結果のため、fix loop が必要" in result.risks
+
+    report = result.outputs["review_report"]
+    assert "## Recommendations" in report
+    assert "- open questions を解消してから実コード変更に進む" in report
+    assert "- test_results の未解決項目を fix loop に送り、再テストする" in report
+    assert "## Risks" in report
+    assert "- warning 以上のレビュー結果のため、fix loop が必要" in report
+    assert "## Copilot Draft Notes" in report
+    assert "Highlight the blocking issues and next actions." in report
 
 
 def test_reviewer_build_fix_targets_falls_back_to_warning_findings() -> None:

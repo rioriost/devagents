@@ -128,7 +128,14 @@ class ModelRouter:
                 task_kind=request.task_kind,
                 mode=request.mode,
                 score_breakdown={"default_fallback": 1},
-                metadata={"required_tags": sorted(required_tags)},
+                metadata={
+                    "required_tags": sorted(required_tags),
+                    "estimated_input_tokens": request.estimated_input_tokens,
+                    "retry_count": request.retry_count,
+                    "fallback_reason": "no_candidate_matched",
+                    "fallback_triggered": True,
+                    "retry_aware_selection": request.retry_count > 0,
+                },
             )
 
         scored_candidates.sort(
@@ -145,6 +152,12 @@ class ModelRouter:
             scored_candidates[1][1].name if len(scored_candidates) > 1 else None
         )
 
+        fallback_reason: str | None = None
+        if fallback_model is not None and request.retry_count > 0:
+            fallback_reason = "retry_alternate_available"
+        elif fallback_model is not None:
+            fallback_reason = "alternate_available"
+
         return RoutingDecision(
             selected_model=best_candidate.name,
             fallback_model=fallback_model,
@@ -156,6 +169,9 @@ class ModelRouter:
                 "required_tags": sorted(required_tags),
                 "estimated_input_tokens": request.estimated_input_tokens,
                 "retry_count": request.retry_count,
+                "fallback_reason": fallback_reason,
+                "fallback_triggered": False,
+                "retry_aware_selection": request.retry_count > 0,
             },
         )
 

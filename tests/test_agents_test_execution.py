@@ -57,6 +57,10 @@ def test_run_builds_results_document_and_metrics() -> None:
                     "Inspect generated docs",
                 ],
             },
+            "execution_artifacts": {
+                "failures": [],
+                "log_summary": ["pytest -q tests passed"],
+            },
             "copilot_response": "Execution draft notes",
         },
     )
@@ -88,6 +92,8 @@ def test_run_builds_results_document_and_metrics() -> None:
         "Artifacts are persisted",
         "Review receives test results",
     ]
+    assert test_results["failure_summary"] == []
+    assert test_results["log_summary"] == ["pytest -q tests passed"]
 
     executed_checks = test_results["executed_checks"]
     assert executed_checks == [
@@ -135,6 +141,7 @@ def test_run_builds_results_document_and_metrics() -> None:
     assert "## Planned Workflow Phases\n1. requirements_analysis" in document
     assert "## Executed Checks\n- routing selection [unit] => passed" in document
     assert "  - Selected model is recorded" in document
+    assert "## Log Summary\n- pytest -q tests passed\n" in document
     assert (
         "## Resolved Decisions\n- Use provisional pass status for draft output"
         in document
@@ -163,6 +170,19 @@ def test_run_uses_fallbacks_and_reports_provisional_risks() -> None:
                 "test_cases": "invalid",
                 "validation_steps": "invalid",
             },
+            "execution_artifacts": {
+                "failures": [
+                    {
+                        "check_id": "pytest-target",
+                        "summary": "Focused pytest target failed",
+                        "details": "AssertionError: expected persisted artifact",
+                    }
+                ],
+                "log_summary": [
+                    "pytest -q tests/test_agents_test_execution.py",
+                    "1 failed, 3 passed",
+                ],
+            },
             "copilot_response": "",
         },
     )
@@ -173,16 +193,28 @@ def test_run_uses_fallbacks_and_reports_provisional_risks() -> None:
     assert result.risks == [
         "具体的な test_cases が不足しているため、検証結果は暫定評価となる",
         "未解決の open questions が残っており、対応方針も未確定のため、最終的な合格判定は保留",
+        "テスト失敗サマリが記録されているため、fix loop または再実行による解消確認が必要",
     ]
 
     test_results = result.outputs["test_results"]
+    assert test_results["status"] == "failed"
     assert test_results["summary"] == (
-        "1/1 checks were provisionally passed, "
-        "but unresolved questions remain before final validation."
+        "1/1 checks were recorded, with 1 failure summaries requiring follow-up."
     )
     assert test_results["acceptance_criteria"] == []
     assert test_results["resolved_decisions"] == []
     assert test_results["open_questions"] == ["Need final validation owner"]
+    assert test_results["failure_summary"] == [
+        {
+            "check_id": "pytest-target",
+            "summary": "Focused pytest target failed",
+            "details": "AssertionError: expected persisted artifact",
+        }
+    ]
+    assert test_results["log_summary"] == [
+        "pytest -q tests/test_agents_test_execution.py",
+        "1 failed, 3 passed",
+    ]
     assert test_results["executed_checks"] == [
         {
             "check_id": "slice-1",
@@ -207,6 +239,16 @@ def test_run_uses_fallbacks_and_reports_provisional_risks() -> None:
     assert "## Objective\nRequirement from workflow state\n" in document
     assert "## Acceptance Criteria Coverage\n- none\n" in document
     assert "## Planned Workflow Phases\n1. none\n" in document
+    assert (
+        "## Failure Summary\n"
+        "- pytest-target: Focused pytest target failed\n"
+        "  - AssertionError: expected persisted artifact\n" in document
+    )
+    assert (
+        "## Log Summary\n"
+        "- pytest -q tests/test_agents_test_execution.py\n"
+        "- 1 failed, 3 passed\n" in document
+    )
     assert "## Open Questions\n- Need final validation owner\n" in document
     assert (
         "## Copilot Draft Notes\nNo additional Copilot draft content was provided.\n"
@@ -305,6 +347,43 @@ def test_build_executed_checks_prefers_cases_then_validation_steps() -> None:
     ]
 
 
+def test_build_failure_summary_and_log_summary_cover_execution_artifacts() -> None:
+    agent = TestExecutionAgent()
+
+    assert agent._build_failure_summary(
+        {
+            "failures": [
+                {
+                    "check_id": "pytest-target",
+                    "summary": "Focused pytest target failed",
+                    "details": "AssertionError",
+                },
+                {
+                    "summary": "",
+                    "details": "",
+                },
+                {
+                    "details": "stderr tail only",
+                },
+            ]
+        }
+    ) == [
+        {
+            "check_id": "pytest-target",
+            "summary": "Focused pytest target failed",
+            "details": "AssertionError",
+        },
+        {
+            "check_id": "failure-3",
+            "summary": "Failure recorded during test execution.",
+            "details": "stderr tail only",
+        },
+    ]
+    assert agent._build_log_summary(
+        {"log_summary": ["pytest -q tests", "", "2 passed"]}
+    ) == ["pytest -q tests", "2 passed"]
+
+
 def test_build_summary_and_render_helpers_cover_notable_branches() -> None:
     agent = TestExecutionAgent()
 
@@ -312,6 +391,7 @@ def test_build_summary_and_render_helpers_cover_notable_branches() -> None:
         executed_checks=[{"status": "passed"}, {"status": "failed"}],
         open_questions=["question"],
         resolved_decisions=[],
+        failure_summary=[],
     ) == (
         "1/2 checks were provisionally passed, "
         "but unresolved questions remain before final validation."
@@ -321,14 +401,30 @@ def test_build_summary_and_render_helpers_cover_notable_branches() -> None:
             executed_checks=[{"status": "passed"}, {"status": "passed"}],
             open_questions=["question"],
             resolved_decisions=["decision"],
+            failure_summary=[],
         )
         == "2/2 checks were provisionally passed."
+    )
+    assert (
+        agent._build_summary(
+            executed_checks=[{"status": "passed"}, {"status": "failed"}],
+            open_questions=[],
+            resolved_decisions=[],
+            failure_summary=[
+                {"check_id": "failure-1", "summary": "failed", "details": ""}
+            ],
+        )
+        == "1/2 checks were recorded, with 1 failure summaries requiring follow-up."
     )
 
     assert agent._render_checks([]) == ["- none"]
     assert agent._render_checks(
         [{"name": "check", "category": "unit", "status": "passed", "details": ""}]
     ) == ["- check [unit] => passed"]
+    assert agent._render_failure_summary([]) == ["- none"]
+    assert agent._render_failure_summary(
+        [{"check_id": "failure-1", "summary": "failed", "details": "stderr"}]
+    ) == ["- failure-1: failed", "  - stderr"]
 
     assert agent._render_bullets([]) == ["- none"]
     assert agent._render_bullets(["x", "y"]) == ["- x", "- y"]

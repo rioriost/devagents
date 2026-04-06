@@ -663,6 +663,9 @@ class SkeletonOrchestrator:
             test_design_result,
         )
         if not rerun_test_execution_result.is_success:
+            state.add_note(
+                "fix loop の rerun test_execution が失敗したため、追加修正またはエスカレーションが必要。"
+            )
             return rerun_test_execution_result
 
         rerun_review_result = await self._run_review_phase(
@@ -675,6 +678,9 @@ class SkeletonOrchestrator:
             rerun_test_execution_result,
         )
         if not rerun_review_result.is_success:
+            state.add_note(
+                "fix loop の rerun review が失敗したため、追加修正またはエスカレーションが必要。"
+            )
             return rerun_review_result
 
         state.add_note(
@@ -919,13 +925,42 @@ class SkeletonOrchestrator:
             state.set_phase(phase)
         else:
             state.increment_retry(task_id)
+            failure_category = (
+                result.failure_category.strip()
+                if isinstance(result.failure_category, str)
+                and result.failure_category.strip()
+                else "implementation_failure"
+            )
+            failure_cause = (
+                result.failure_cause.strip()
+                if isinstance(result.failure_cause, str)
+                and result.failure_cause.strip()
+                else result.summary
+            )
+            next_actions = [
+                str(action).strip()
+                for action in result.next_actions
+                if str(action).strip()
+            ]
+            failure_outputs = dict(result.outputs)
+            failure_outputs["failure_category"] = failure_category
+            failure_outputs["failure_cause"] = failure_cause
+            failure_outputs["next_actions"] = next_actions
             state.update_task_status(
                 task_id,
                 TaskStatus.FAILED,
                 note=result.summary,
-                outputs=result.outputs,
+                outputs=failure_outputs,
+            )
+            state.require_task(task_id).add_note(
+                f"[failure_category={failure_category}; failure_cause={failure_cause}]"
             )
             state.set_phase(WorkflowPhase.FAILED)
+            state.add_note(
+                f"{task_id} failed: category={failure_category}; cause={failure_cause}"
+            )
+            if next_actions:
+                state.add_note(f"{task_id} next actions: {' | '.join(next_actions)}")
 
         for artifact in result.artifacts:
             state.add_artifact(artifact)

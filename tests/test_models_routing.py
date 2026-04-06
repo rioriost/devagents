@@ -140,6 +140,11 @@ def test_route_returns_default_when_no_candidate_matches_required_tags() -> None
         "long_context",
         "reasoning",
     ]
+    assert decision.metadata["estimated_input_tokens"] == 32_000
+    assert decision.metadata["retry_count"] == 0
+    assert decision.metadata["fallback_reason"] == "no_candidate_matched"
+    assert decision.metadata["fallback_triggered"] is True
+    assert decision.metadata["retry_aware_selection"] is False
 
 
 def test_route_skips_candidates_with_insufficient_context_capacity() -> None:
@@ -206,6 +211,9 @@ def test_route_prefers_quality_candidate_in_quality_mode() -> None:
     assert decision.score_breakdown["latency_sensitivity_bonus"] == 0
     assert decision.score_breakdown["retry_bonus"] == 0
     assert decision.score_breakdown["analysis_bonus"] == 20
+    assert decision.metadata["fallback_reason"] == "alternate_available"
+    assert decision.metadata["fallback_triggered"] is False
+    assert decision.metadata["retry_aware_selection"] is False
 
 
 def test_route_prefers_fast_candidate_in_cost_saver_mode_when_scores_favor_it() -> None:
@@ -228,6 +236,9 @@ def test_route_prefers_fast_candidate_in_cost_saver_mode_when_scores_favor_it() 
     assert decision.score_breakdown["difficulty_bonus"] == 12
     assert decision.score_breakdown["latency_sensitivity_bonus"] == 20
     assert decision.score_breakdown["analysis_bonus"] == 10
+    assert decision.metadata["fallback_reason"] == "alternate_available"
+    assert decision.metadata["fallback_triggered"] is False
+    assert decision.metadata["retry_aware_selection"] is False
 
 
 def test_route_uses_context_tokens_as_tiebreaker_when_scores_and_quality_match() -> (
@@ -264,6 +275,9 @@ def test_route_uses_context_tokens_as_tiebreaker_when_scores_and_quality_match()
 
     assert decision.selected_model == "more-context"
     assert decision.fallback_model == "less-context"
+    assert decision.metadata["fallback_reason"] == "alternate_available"
+    assert decision.metadata["fallback_triggered"] is False
+    assert decision.metadata["retry_aware_selection"] is False
 
 
 def test_routing_request_normalized_difficulty_clamps_bounds() -> None:
@@ -318,3 +332,25 @@ def test_routing_decision_to_dict_serializes_enums() -> None:
     assert payload["mode"] == "balanced"
     assert payload["selected_model"] == decision.selected_model
     assert payload["fallback_model"] == decision.fallback_model
+    assert payload["metadata"] == decision.metadata
+
+
+def test_route_marks_retry_aware_alternate_fallback_metadata() -> None:
+    router = build_router()
+
+    decision = router.route(
+        RoutingRequest(
+            task_kind=TaskKind.REVIEW,
+            difficulty=5,
+            mode=RoutingMode.QUALITY,
+            requires_high_reasoning=True,
+            retry_count=2,
+        )
+    )
+
+    assert decision.selected_model == "high-quality"
+    assert decision.fallback_model == "reasoning-specialist"
+    assert decision.metadata["retry_count"] == 2
+    assert decision.metadata["fallback_reason"] == "retry_alternate_available"
+    assert decision.metadata["fallback_triggered"] is False
+    assert decision.metadata["retry_aware_selection"] is True

@@ -77,19 +77,6 @@ class ReviewAgent(BaseAgent):
             unresolved_issues=unresolved_issues,
             recommendations=recommendations,
         )
-        review_report = self._build_review_report(
-            objective=objective,
-            findings=findings,
-            recommendations=recommendations,
-            acceptance_criteria=acceptance_criteria,
-            constraints=constraints,
-            open_questions=open_questions,
-            resolved_decisions=resolved_decisions,
-            copilot_response=copilot_response,
-            fix_loop_required=fix_loop_required,
-            fix_targets=fix_targets,
-        )
-
         risks = []
         if unresolved_issues:
             risks.append("レビューで未解決事項が残っているため、実装完了判定は保留")
@@ -99,6 +86,20 @@ class ReviewAgent(BaseAgent):
             )
         if fix_loop_required:
             risks.append("warning 以上のレビュー結果のため、fix loop が必要")
+
+        review_report = self._build_review_report(
+            objective=objective,
+            findings=findings,
+            recommendations=recommendations,
+            acceptance_criteria=acceptance_criteria,
+            constraints=constraints,
+            open_questions=open_questions,
+            resolved_decisions=resolved_decisions,
+            risks=risks,
+            copilot_response=copilot_response,
+            fix_loop_required=fix_loop_required,
+            fix_targets=fix_targets,
+        )
 
         return AgentResult.success(
             "レビュー報告を生成し、未解決事項と次アクションを整理した。",
@@ -369,6 +370,7 @@ class ReviewAgent(BaseAgent):
         constraints: list[str],
         open_questions: list[str],
         resolved_decisions: list[str],
+        risks: list[str],
         copilot_response: str,
         fix_loop_required: bool,
         fix_targets: list[dict[str, str]],
@@ -419,6 +421,13 @@ class ReviewAgent(BaseAgent):
                 ]
             )
             lines.extend(self._render_bullets(open_questions))
+        lines.extend(
+            [
+                "",
+                "## Risks",
+            ]
+        )
+        lines.extend(self._render_bullets(risks))
         lines.extend(
             [
                 "",

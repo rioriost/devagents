@@ -29,6 +29,8 @@ class AgentResult:
     next_actions: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
+    failure_category: str | None = None
+    failure_cause: str | None = None
 
     @property
     def is_success(self) -> bool:
@@ -53,6 +55,8 @@ class AgentResult:
             next_actions=list(next_actions or []),
             risks=list(risks or []),
             metrics=dict(metrics or {}),
+            failure_category=None,
+            failure_cause=None,
         )
 
     @classmethod
@@ -65,6 +69,8 @@ class AgentResult:
         next_actions: list[str] | None = None,
         risks: list[str] | None = None,
         metrics: Mapping[str, Any] | None = None,
+        failure_category: str | None = None,
+        failure_cause: str | None = None,
     ) -> AgentResult:
         return cls(
             status="failed",
@@ -74,6 +80,8 @@ class AgentResult:
             next_actions=list(next_actions or []),
             risks=list(risks or []),
             metrics=dict(metrics or {}),
+            failure_category=failure_category,
+            failure_cause=failure_cause,
         )
 
 

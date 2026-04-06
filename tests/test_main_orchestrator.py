@@ -315,12 +315,18 @@ def make_failure(
     outputs: dict[str, Any] | None = None,
     artifacts: list[str] | None = None,
     risks: list[str] | None = None,
+    next_actions: list[str] | None = None,
+    failure_category: str | None = None,
+    failure_cause: str | None = None,
 ) -> AgentResult:
     return AgentResult.failure(
         summary,
         outputs=outputs or {},
         artifacts=artifacts or [],
         risks=risks or [],
+        next_actions=next_actions or [],
+        failure_category=failure_category,
+        failure_cause=failure_cause,
     )
 
 
@@ -848,6 +854,240 @@ def test_run_completes_full_flow_and_writes_artifacts(tmp_path: Path) -> None:
     assert "Promote safe edit outputs" in snapshot_call["next_action"]
 
 
+def test_run_rotates_session_and_persists_artifacts_across_fix_loop(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    orchestrator.requirements_agent = DummyAgent(
+        "requirements",
+        make_result(
+            summary="requirements done",
+            outputs={"normalized_requirements": {"objective": "Build workflow"}},
+        ),
+    )
+    orchestrator.planning_agent = DummyAgent(
+        "planner",
+        make_result(summary="planning done", outputs={"plan": {"phases": ["plan"]}}),
+    )
+    orchestrator.documentation_agent = DummyAgent(
+        "documentation",
+        make_result(
+            summary="documentation done",
+            outputs={"documentation_bundle": {"design_doc": "doc text"}},
+        ),
+    )
+    orchestrator.implementation_agent = DummyAgent(
+        "implementation",
+        make_result(
+            summary="implementation done",
+            outputs={"implementation": {"changes": ["src/devagents/main.py"]}},
+        ),
+    )
+    orchestrator.test_design_agent = DummyAgent(
+        "test-design",
+        make_result(
+            summary="test design done",
+            outputs={
+                "test_plan": {"cases": ["parser", "orchestrator"]},
+                "test_plan_document": "# test plan",
+            },
+        ),
+    )
+    orchestrator.test_execution_agent = DummyAgent(
+        "test-execution",
+        make_result(
+            summary="test execution done",
+            outputs={
+                "test_results": {"status": "failed", "failures": ["review issue"]},
+                "test_results_document": "# test results",
+            },
+        ),
+    )
+    orchestrator.review_agent = DummyAgent(
+        "review",
+        make_result(
+            summary="review done",
+            outputs={
+                "review": {"fix_loop_required": True, "blocking_issues": ["issue"]},
+                "review_report": "# review report",
+            },
+        ),
+    )
+    orchestrator.fixer_agent = DummyAgent(
+        "fixer",
+        make_result(
+            summary="fix prepared",
+            outputs={
+                "fix_report": "# fix report",
+                "implementation": {
+                    "changes": [
+                        "src/devagents/main.py",
+                        "tests/test_main_orchestrator.py",
+                    ]
+                },
+            },
+        ),
+    )
+
+    original_test_execution_phase = orchestrator._run_test_execution_phase
+    original_review_phase = orchestrator._run_review_phase
+
+    rerun_test_result = make_result(
+        summary="tests rerun",
+        outputs={
+            "test_results": {"status": "passed"},
+            "test_results_document": "# rerun test results",
+        },
+    )
+    rerun_review_result = make_result(
+        summary="review rerun",
+        outputs={
+            "review": {"fix_loop_required": False},
+            "review_report": "# rerun review report",
+        },
+    )
+
+    test_execution_calls: list[dict[str, Any]] = []
+    review_calls: list[dict[str, Any]] = []
+
+    async def fake_test_execution(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+    ) -> AgentResult:
+        test_execution_calls.append(
+            {
+                "state": state_arg,
+                "requirements_result": requirements_result,
+                "planning_result": planning_result,
+                "implementation_result": implementation_result,
+                "test_design_result": test_design_result,
+            }
+        )
+        if len(test_execution_calls) == 1:
+            return await original_test_execution_phase(
+                state_arg,
+                requirements_result,
+                planning_result,
+                implementation_result,
+                test_design_result,
+            )
+        state_arg.update_task_status(
+            "test_execution",
+            TaskStatus.COMPLETED,
+            note=rerun_test_result.summary,
+            outputs=rerun_test_result.outputs,
+        )
+        state_arg.set_phase(WorkflowPhase.TESTING)
+        orchestrator.artifact_writer.persist_text_output(
+            state=state_arg,
+            result=rerun_test_result,
+            output_key="test_results_document",
+            target_name="test-results.md",
+        )
+        return rerun_test_result
+
+    async def fake_review_phase(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        documentation_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+        test_execution_result: AgentResult,
+    ) -> AgentResult:
+        review_calls.append(
+            {
+                "state": state_arg,
+                "requirements_result": requirements_result,
+                "planning_result": planning_result,
+                "documentation_result": documentation_result,
+                "implementation_result": implementation_result,
+                "test_design_result": test_design_result,
+                "test_execution_result": test_execution_result,
+            }
+        )
+        if len(review_calls) == 1:
+            return await original_review_phase(
+                state_arg,
+                requirements_result,
+                planning_result,
+                documentation_result,
+                implementation_result,
+                test_design_result,
+                test_execution_result,
+            )
+        state_arg.update_task_status(
+            "review",
+            TaskStatus.COMPLETED,
+            note=rerun_review_result.summary,
+            outputs=rerun_review_result.outputs,
+        )
+        state_arg.set_phase(WorkflowPhase.REVIEWING)
+        orchestrator.artifact_writer.persist_text_output(
+            state=state_arg,
+            result=rerun_review_result,
+            output_key="review_report",
+            target_name="review-report.md",
+        )
+        return rerun_review_result
+
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    state = asyncio.run(
+        orchestrator.run(
+            "Build a multi-agent workflow",
+            token_usage_ratio=0.82,
+        )
+    )
+
+    assert state.phase is WorkflowPhase.COMPLETED
+    assert len(orchestrator.runtime_support.rotate_calls) == 1
+    rotate_call = orchestrator.runtime_support.rotate_calls[0]
+    assert rotate_call["token_usage_ratio"] == 0.82
+    assert rotate_call["next_action"] == "Resume review after test_execution"
+    assert rotate_call["last_checkpoint"] == WorkflowPhase.TESTING.value
+    assert rotate_call["persistent_context"]["test_results"] == {
+        "status": "failed",
+        "failures": ["review issue"],
+    }
+
+    assert len(test_execution_calls) == 2
+    assert len(review_calls) == 2
+    assert review_calls[1]["test_execution_result"] is rerun_test_result
+
+    assert len(orchestrator.artifact_writer.text_calls) == 6
+    assert [
+        call["target_name"] for call in orchestrator.artifact_writer.text_calls
+    ] == [
+        "test-plan.md",
+        "test-results.md",
+        "review-report.md",
+        "fix-report.md",
+        "test-results.md",
+        "review-report.md",
+    ]
+    assert len(orchestrator.artifact_writer.workflow_calls) == 1
+    workflow_call = orchestrator.artifact_writer.workflow_calls[0]
+    assert workflow_call["state"] is state
+    assert workflow_call["fix_result"].outputs["implementation"]["changes"] == [
+        "src/devagents/main.py",
+        "tests/test_main_orchestrator.py",
+    ]
+
+    assert len(orchestrator.session_manager.snapshot_calls) == 1
+    snapshot_call = orchestrator.session_manager.snapshot_calls[0]
+    assert snapshot_call["token_usage_ratio"] == 0.82
+    assert snapshot_call["last_checkpoint"] == WorkflowPhase.REVIEWING.value
+    assert "Promote safe edit outputs" in snapshot_call["next_action"]
+
+    assert any("fix loop を 1 回実行" in note for note in state.notes)
+    assert any("fix proposal を生成した。" in note for note in state.notes)
+
+
 def test_run_stops_after_failed_phase_and_skips_later_work(tmp_path: Path) -> None:
     orchestrator = make_orchestrator(tmp_path)
     orchestrator.requirements_agent = DummyAgent(
@@ -929,6 +1169,59 @@ def test_run_fix_loop_returns_failed_fix_result_without_reruns(tmp_path: Path) -
     assert rerun_calls == []
 
 
+def test_apply_result_records_failure_classification_and_next_actions(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    failed_result = make_failure(
+        summary="planning failed",
+        outputs={"open_questions": ["missing architecture choice"]},
+        next_actions=[
+            "Clarify the architecture decision",
+            "Retry planning with the chosen direction",
+        ],
+        failure_category="design_inconsistency",
+        failure_cause="architecture decision is still unresolved",
+    )
+
+    orchestrator._apply_result(
+        state=state,
+        task_id="planning",
+        phase=WorkflowPhase.PLANNED,
+        result=failed_result,
+    )
+
+    planning_task = state.require_task("planning")
+    assert state.phase is WorkflowPhase.FAILED
+    assert planning_task.status is TaskStatus.FAILED
+    assert planning_task.outputs["failure_category"] == "design_inconsistency"
+    assert (
+        planning_task.outputs["failure_cause"]
+        == "architecture decision is still unresolved"
+    )
+    assert planning_task.outputs["next_actions"] == [
+        "Clarify the architecture decision",
+        "Retry planning with the chosen direction",
+    ]
+    assert "failure_category=design_inconsistency" in planning_task.notes[-1]
+    assert any(
+        note
+        == (
+            "planning failed: category=design_inconsistency; "
+            "cause=architecture decision is still unresolved"
+        )
+        for note in state.notes
+    )
+    assert any(
+        note
+        == "planning next actions: Clarify the architecture decision | Retry planning with the chosen direction"
+        for note in state.notes
+    )
+    assert state.open_questions == ["missing architecture choice"]
+
+
 def test_run_fix_loop_returns_failed_rerun_test_result(tmp_path: Path) -> None:
     orchestrator = make_orchestrator(tmp_path)
     state = make_state()
@@ -1008,6 +1301,156 @@ def test_run_fix_loop_returns_failed_rerun_review_result(tmp_path: Path) -> None
     )
 
     assert result is failed_rerun_review_result
+
+
+def test_run_fix_loop_records_escalation_note_when_rerun_test_execution_fails(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    fix_result = make_result(
+        summary="fix ready",
+        outputs={"implementation": {"changes": ["patch"]}},
+    )
+    rerun_test_result = make_failure(
+        summary="rerun tests failed",
+        outputs={"test_results": {"status": "failed"}},
+    )
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        return fix_result
+
+    async def fake_test_execution(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+    ) -> AgentResult:
+        return rerun_test_result
+
+    async def fake_review_phase(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        documentation_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+        test_execution_result: AgentResult,
+    ) -> AgentResult:
+        raise AssertionError("review rerun should not execute after failed rerun tests")
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(
+                outputs={"normalized_requirements": {"objective": "x"}}
+            ),
+            planning_result=make_result(outputs={"plan": {"steps": ["a"]}}),
+            documentation_result=make_result(
+                outputs={"documentation_bundle": {"doc": "x"}}
+            ),
+            implementation_result=make_result(
+                outputs={"implementation": {"changes": ["base"]}}
+            ),
+            test_design_result=make_result(outputs={"test_plan": {"cases": ["c1"]}}),
+            test_execution_result=make_result(
+                outputs={"test_results": {"status": "failed"}}
+            ),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result is rerun_test_result
+    assert any(
+        "fix loop を開始した。" in note
+        for note in state.require_task("implementation").notes
+    )
+    assert any(
+        "escalation" in note or "エスカレーション" in note for note in state.notes
+    )
+
+
+def test_run_fix_loop_records_escalation_note_when_rerun_review_fails(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    fix_result = make_result(
+        summary="fix ready",
+        outputs={"implementation": {"changes": ["patch"]}},
+    )
+    rerun_test_result = make_result(
+        summary="tests rerun",
+        outputs={"test_results": {"status": "passed"}},
+    )
+    rerun_review_result = make_failure(
+        summary="rerun review failed",
+        outputs={"review": {"fix_loop_required": True}},
+    )
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        return fix_result
+
+    async def fake_test_execution(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+    ) -> AgentResult:
+        return rerun_test_result
+
+    async def fake_review_phase(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        documentation_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+        test_execution_result: AgentResult,
+    ) -> AgentResult:
+        return rerun_review_result
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(
+                outputs={"normalized_requirements": {"objective": "x"}}
+            ),
+            planning_result=make_result(outputs={"plan": {"steps": ["a"]}}),
+            documentation_result=make_result(
+                outputs={"documentation_bundle": {"doc": "x"}}
+            ),
+            implementation_result=make_result(
+                outputs={"implementation": {"changes": ["base"]}}
+            ),
+            test_design_result=make_result(outputs={"test_plan": {"cases": ["c1"]}}),
+            test_execution_result=make_result(
+                outputs={"test_results": {"status": "failed"}}
+            ),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result is rerun_review_result
+    assert any(
+        "fix loop を開始した。" in note
+        for note in state.require_task("implementation").notes
+    )
+    assert any(
+        "escalation" in note or "エスカレーション" in note for note in state.notes
+    )
 
 
 def test_run_fix_phase_persists_fix_report_and_note(tmp_path: Path) -> None:
