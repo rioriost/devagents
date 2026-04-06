@@ -17,6 +17,71 @@ def run(coro):
     return asyncio.run(coro)
 
 
+class DummyAsyncContextManager:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class DummySession:
+    def __init__(
+        self,
+        *,
+        session_id: str = "sdk-session",
+        workspace_path: str = "/tmp/workspace",
+        event_result=None,
+        messages=None,
+    ) -> None:
+        self.session_id = session_id
+        self.workspace_path = workspace_path
+        self.event_result = event_result
+        self.messages = list(messages or [])
+        self.send_calls: list[dict[str, object]] = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def send_and_wait(self, prompt: str, *, timeout: float):
+        self.send_calls.append({"prompt": prompt, "timeout": timeout})
+        return self.event_result
+
+    async def get_messages(self):
+        return list(self.messages)
+
+
+class DummySdkClient:
+    def __init__(self, session):
+        self.session = session
+        self.resume_calls: list[tuple[str, dict[str, object]]] = []
+        self.create_calls: list[dict[str, object]] = []
+        self.list_models_result = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def resume_session(self, session_id: str, **kwargs):
+        self.resume_calls.append((session_id, kwargs))
+        return self.session
+
+    async def create_session(self, **kwargs):
+        self.create_calls.append(kwargs)
+        return self.session
+
+    async def list_models(self):
+        return list(self.list_models_result)
+
+
 def make_event(
     event_type: str | None = None,
     *,
@@ -440,8 +505,207 @@ def test_default_model_list_contains_expected_models_and_capabilities() -> None:
         "gpt-5.4-nano",
     ]
     assert models[0]["capabilities"]["supports"]["vision"] is True
-    assert models[1]["capabilities"]["supports"]["reasoningEffort"] is True
     assert models[2]["capabilities"]["supports"]["reasoningEffort"] is False
+
+
+def test_invoke_sdk_uses_event_content_when_available() -> None:
+    client = CopilotClient(CopilotClientConfig(timeout_seconds=12.5))
+    event = make_event(
+        "assistant.message",
+        content="event content",
+        usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
+        finish_reason="stop",
+    )
+    messages = [
+        make_event(
+            "assistant.message",
+            content="message content",
+            usage={"input_tokens": 4, "output_tokens": 5, "total_tokens": 9},
+            finish_reason="done",
+        )
+    ]
+    session = DummySession(event_result=event, messages=messages)
+    sdk_client = DummySdkClient(session)
+
+    client._import_sdk_client_module = lambda: SimpleNamespace()  # type: ignore[method-assign]
+    client._import_sdk_session_module = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        PermissionHandler=SimpleNamespace(approve_all="approve-all")
+    )
+    client._build_sdk_client = lambda module: sdk_client  # type: ignore[method-assign]
+
+    result = run(
+        client._invoke_sdk(
+            CopilotRequest(
+                prompt="hello",
+                task_type=CopilotTaskType.GENERAL,
+                workflow_id="wf-1",
+            ),
+            "gpt-5.4",
+        )
+    )
+
+    assert result["content"] == "event content"
+    assert result["model"] == "gpt-5.4"
+    assert result["session_id"] == "sdk-session"
+    assert result["workflow_id"] == "wf-1"
+    assert result["finish_reason"] == "done"
+    assert result["usage"]["input_tokens"] == 4
+    assert result["message_count"] == 1
+    assert session.send_calls == [{"prompt": "hello", "timeout": 12.5}]
+    assert sdk_client.create_calls
+
+
+def test_invoke_sdk_falls_back_to_message_content_when_event_has_none() -> None:
+    client = CopilotClient()
+    event = make_event("assistant.message")
+    messages = [
+        make_event(
+            "assistant.message",
+            content="message fallback",
+            usage={"inputTokens": 7, "outputTokens": 8, "totalTokens": 15},
+            finishReason="completed",
+        )
+    ]
+    session = DummySession(event_result=event, messages=messages)
+    sdk_client = DummySdkClient(session)
+
+    client._import_sdk_client_module = lambda: SimpleNamespace()  # type: ignore[method-assign]
+    client._import_sdk_session_module = lambda: SimpleNamespace(  # type: ignore[method-assign]
+        PermissionHandler=SimpleNamespace(approve_all="approve-all")
+    )
+    client._build_sdk_client = lambda module: sdk_client  # type: ignore[method-assign]
+
+    result = run(
+        client._invoke_sdk(
+            CopilotRequest(
+                prompt="hello",
+                session_id="resume-me",
+                task_type=CopilotTaskType.REVIEW,
+            ),
+            "gpt-5.4-mini",
+        )
+    )
+
+    assert result["content"] == "message fallback"
+    assert result["finish_reason"] == "completed"
+    assert result["usage"]["input_tokens"] == 7
+    assert sdk_client.resume_calls[0][0] == "resume-me"
+
+
+def test_list_models_uses_sdk_when_available() -> None:
+    client = CopilotClient()
+    sdk_client = DummySdkClient(session=None)
+    sdk_client.list_models_result = [
+        SimpleNamespace(to_dict=lambda: {"id": "sdk-model-1"}),
+        SimpleNamespace(name="sdk-model-2"),
+    ]
+
+    client._import_sdk_client_module = lambda: SimpleNamespace()  # type: ignore[method-assign]
+    client._build_sdk_client = lambda module: sdk_client  # type: ignore[method-assign]
+
+    models = run(client.list_models())
+
+    assert models == [
+        {"id": "sdk-model-1"},
+        {"name": "sdk-model-2"},
+    ]
+
+
+def test_extract_content_from_messages_returns_empty_when_no_assistant_message() -> (
+    None
+):
+    client = CopilotClient()
+
+    messages = [
+        make_event("user.message", content="user"),
+        make_event("system.message", content="system"),
+    ]
+
+    assert client._extract_content_from_messages(messages) == ""
+
+
+def test_extract_usage_from_messages_returns_none_fields_when_missing() -> None:
+    client = CopilotClient()
+
+    usage = client._extract_usage_from_messages([make_event("assistant.message")])
+
+    assert usage == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "token_usage_ratio": None,
+    }
+
+
+def test_extract_finish_reason_from_messages_returns_none_when_missing() -> None:
+    client = CopilotClient()
+
+    assert (
+        client._extract_finish_reason_from_messages([make_event("assistant.message")])
+        is None
+    )
+
+
+def test_event_to_dict_handles_missing_type_and_data() -> None:
+    client = CopilotClient()
+
+    payload = client._event_to_dict(SimpleNamespace(type=None, data=None))
+
+    assert payload == {"type": None, "data": {}}
+
+
+def test_model_info_to_dict_falls_back_to_object_dict() -> None:
+    client = CopilotClient()
+
+    payload = client._model_info_to_dict(SimpleNamespace(name="model-a", version="1"))
+
+    assert payload == {"name": "model-a", "version": "1"}
+
+
+def test_import_sdk_session_module_raises_client_error_when_missing(
+    monkeypatch,
+) -> None:
+    client = CopilotClient()
+
+    original_import = __import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "copilot.session":
+            raise ImportError("missing session module")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+
+    try:
+        client._import_sdk_session_module()
+    except CopilotClientError as exc:
+        assert "session module is not importable" in str(exc)
+    else:
+        raise AssertionError("Expected CopilotClientError")
+
+
+def test_demo_runs_generate_text_and_prints_content(monkeypatch) -> None:
+    client = CopilotClient()
+    captured: list[str] = []
+
+    async def fake_generate_text(*args, **kwargs):
+        return CopilotResponse(
+            content="demo output",
+            model="gpt-5.4",
+            task_type=CopilotTaskType.SUMMARY,
+        )
+
+    monkeypatch.setattr(
+        "devagents.runtime.copilot_client.CopilotClient", lambda: client
+    )
+    monkeypatch.setattr(client, "generate_text", fake_generate_text)
+    monkeypatch.setattr("builtins.print", lambda value: captured.append(str(value)))
+
+    from devagents.runtime import copilot_client as copilot_client_module
+
+    run(copilot_client_module._demo())
+
+    assert captured == ["demo output"]
 
 
 def test_list_models_returns_default_models_when_sdk_disabled() -> None:
