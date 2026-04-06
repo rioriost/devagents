@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from devagents.agents.test_execution import TestExecutionAgent
 from devagents.models.routing import ModelRouter, RoutingMode
 from devagents.orchestration.artifact_writer import WorkflowArtifactWriter
 from devagents.orchestration.edit_phase import EditPhaseOrchestrator
+from devagents.orchestration.runtime_support import RuntimeSupport
 from devagents.orchestration.session_manager import SessionManager
 from devagents.orchestration.state_store import StateStore
 from devagents.orchestration.workflow import (
@@ -32,8 +33,6 @@ from devagents.orchestration.workflow import (
     create_workflow_state,
 )
 from devagents.runtime.code_editing import (
-    CodeEditKind,
-    CodeEditRequest,
     StructuredCodeEditor,
     approve_src_devagents_only,
 )
@@ -42,13 +41,7 @@ from devagents.runtime.copilot_client import (
     CopilotRequest,
     CopilotTaskType,
 )
-from devagents.runtime.editor import (
-    EditOperationKind,
-    EditorPolicy,
-    EditRequest,
-    SafeEditor,
-    approve_docs_and_artifacts_only,
-)
+from devagents.runtime.editor import EditorPolicy, SafeEditor
 
 ARTIFACTS_DIR = Path("artifacts")
 DOCS_DIR = Path("docs")
@@ -87,11 +80,6 @@ class SkeletonOrchestrator:
             state_store=self.state_store,
             session_manager=self.session_manager,
         )
-        self.edit_phase = EditPhaseOrchestrator(
-            safe_editor=self.safe_editor,
-            code_editor=self.code_editor,
-            artifact_writer=self.artifact_writer,
-        )
         self.model_router = ModelRouter(default_model=model)
         self.copilot_client = CopilotClient()
         self.safe_editor = SafeEditor(
@@ -103,11 +91,21 @@ class SkeletonOrchestrator:
                 require_approval_for_overwrite_outside_docs=True,
                 allow_absolute_paths=False,
             ),
-            approval_hook=self._approval_hook,
+            approval_hook=None,
         )
         self.code_editor = StructuredCodeEditor(
             workspace_root=Path.cwd(),
             approval_hook=approve_src_devagents_only,
+        )
+        self.runtime_support = RuntimeSupport(
+            state_store=self.state_store,
+            session_manager=self.session_manager,
+        )
+        self.safe_editor.approval_hook = self.runtime_support.approval_hook
+        self.edit_phase = EditPhaseOrchestrator(
+            safe_editor=self.safe_editor,
+            code_editor=self.code_editor,
+            artifact_writer=self.artifact_writer,
         )
 
     async def run(
@@ -170,7 +168,7 @@ class SkeletonOrchestrator:
         if not test_execution_result.is_success:
             return state
 
-        self._rotate_session_if_needed(
+        self.runtime_support.rotate_session_if_needed(
             state,
             token_usage_ratio=token_usage_ratio,
             next_action="Resume review after test_execution",
@@ -769,33 +767,6 @@ class SkeletonOrchestrator:
 
         return result
 
-    def _rotate_session_if_needed(
-        self,
-        state: WorkflowState,
-        *,
-        token_usage_ratio: float,
-        next_action: str,
-        last_checkpoint: str,
-        persistent_context: dict[str, Any],
-    ) -> None:
-        decision, snapshot = self.session_manager.rotate_session(
-            state,
-            token_usage_ratio=token_usage_ratio,
-            next_action=next_action,
-            last_checkpoint=last_checkpoint,
-            persistent_context=persistent_context,
-        )
-        if decision.should_rotate:
-            previous_session_id = snapshot.session_id
-            previous_snapshot_path = self.state_store.save_session_snapshot(snapshot)
-            state.add_note(
-                "mid-run session rotation を実行し、後続フェーズを新 session で継続する。"
-            )
-            state.add_artifact(previous_snapshot_path.as_posix())
-            state.add_note(
-                f"pre-rotation session snapshot を保存した: {previous_session_id}"
-            )
-
     async def _execute_phase(
         self,
         *,
@@ -966,43 +937,6 @@ class SkeletonOrchestrator:
             for question in open_questions:
                 if question:
                     state.add_open_question(str(question))
-
-    def _approval_hook(
-        self,
-        request: EditRequest,
-        absolute_path: Path,
-    ):
-        relative_path = request.normalized_relative_path()
-
-        if relative_path.startswith("docs/") or relative_path.startswith("artifacts/"):
-            return approve_docs_and_artifacts_only(request, absolute_path)
-
-        if relative_path.startswith("src/devagents/"):
-            if request.operation == EditOperationKind.DELETE:
-                from devagents.runtime.editor import ApprovalDecision, ApprovalResult
-
-                return ApprovalResult(
-                    decision=ApprovalDecision.DENIED,
-                    reason="delete operations under src/devagents are not allowed",
-                )
-
-            if request.operation in {
-                EditOperationKind.WRITE,
-                EditOperationKind.APPEND,
-            }:
-                from devagents.runtime.editor import ApprovalDecision, ApprovalResult
-
-                return ApprovalResult(
-                    decision=ApprovalDecision.APPROVED,
-                    reason="src/devagents allowlist permits controlled edits",
-                )
-
-        from devagents.runtime.editor import ApprovalDecision, ApprovalResult
-
-        return ApprovalResult(
-            decision=ApprovalDecision.DENIED,
-            reason="target is outside configured approval scope",
-        )
 
     def _build_workflow_id(self) -> str:
         from datetime import UTC, datetime
