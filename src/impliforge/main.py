@@ -1299,6 +1299,8 @@ async def _run_cli(
         print(f"error: requirement file is empty: {requirement_path}")
         return 1
 
+    target_workspace_root = requirement_path.resolve().parent
+
     orchestrator = SkeletonOrchestrator(
         model=model,
         artifacts_dir=Path(artifacts_dir),
@@ -1309,6 +1311,7 @@ async def _run_cli(
         requirement,
         token_usage_ratio=token_usage_ratio,
     )
+    state.add_note(f"target_workspace_root: {target_workspace_root.as_posix()}")
     rotation_decision = orchestrator.session_manager.should_rotate_session(
         token_usage_ratio=token_usage_ratio,
         current_session_id=state.session_id,

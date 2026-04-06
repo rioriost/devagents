@@ -32,7 +32,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable
 
-DEFAULT_ALLOWED_PREFIXES = ("src/impliforge",)
+DEFAULT_ALLOWED_PREFIXES = ("src", "tests")
 DEFAULT_PROTECTED_PREFIXES = (".git", ".venv")
 DEFAULT_ALLOWED_EXTENSIONS = (".py",)
 SECRET_DETECTION_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -200,9 +200,12 @@ class CodeEditingPolicy:
         if not approval_policy:
             return True
 
-        if approval_policy == "src_impliforge_structured_only":
-            return relative_path == "src/impliforge" or relative_path.startswith(
-                "src/impliforge/"
+        if approval_policy == "cwd_workspace_structured_only":
+            return (
+                relative_path == "src"
+                or relative_path.startswith("src/")
+                or relative_path == "tests"
+                or relative_path.startswith("tests/")
             )
 
         return False
@@ -212,8 +215,11 @@ class CodeEditingPolicy:
             return True
 
         if consumability == "structured_code_editor":
-            return relative_path == "src/impliforge" or relative_path.startswith(
-                "src/impliforge/"
+            return (
+                relative_path == "src"
+                or relative_path.startswith("src/")
+                or relative_path == "tests"
+                or relative_path.startswith("tests/")
             )
 
         return False
@@ -552,7 +558,7 @@ def has_code_edit_risk_flag(request: CodeEditRequest, *flags: CodeEditRiskFlag) 
 def proposal_policy_requires_explicit_approval(approval_policy: str) -> bool:
     """Return whether a proposal policy should require explicit approval."""
     return approval_policy in {
-        "src_impliforge_structured_only",
+        "cwd_workspace_structured_only",
     }
 
 
@@ -577,7 +583,10 @@ def approve_src_impliforge_only(
     relative_path = request.normalized_relative_path()
 
     if not (
-        relative_path == "src/impliforge" or relative_path.startswith("src/impliforge/")
+        relative_path == "src"
+        or relative_path.startswith("src/")
+        or relative_path == "tests"
+        or relative_path.startswith("tests/")
     ):
         return CodeApprovalResult(
             decision=CodeApprovalDecision.DENIED,

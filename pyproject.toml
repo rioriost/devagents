@@ -1,6 +1,6 @@
 [project]
 name = "impliforge"
-version = "0.1.1"
+version = "0.1.3"
 description = "Orchestrator-centric multi-agent workflow runner built on the GitHub Copilot SDK"
 readme = "README.md"
 authors = [

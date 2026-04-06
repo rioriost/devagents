@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from typing import Any
 
 from impliforge.agents.base import AgentResult, AgentTask, BaseAgent
@@ -37,65 +39,29 @@ class ImplementationAgent(BaseAgent):
         )
         plan_phases = self._normalize_list(plan.get("phases"))
         task_breakdown = self._normalize_task_breakdown(plan.get("task_breakdown"))
+        target_source_roots = self._build_target_source_roots()
+        structured_edit_targets = self._build_structured_edit_targets(
+            target_source_roots,
+            objective=objective,
+        )
 
         edit_proposals = [
             self._build_edit_proposal(
-                proposal_id="src-structured-main-update",
-                summary="Wire implementation outputs into the orchestrator through a structured source edit path.",
-                targets=["src/impliforge/main.py"],
+                proposal_id="cwd-structured-src-update",
+                summary="Promote implementation proposals into generic ensure-snippet payloads for target workspace source files.",
+                targets=structured_edit_targets,
                 instructions=[
-                    "Keep the change small and limited to orchestration flow integration.",
-                    "Do not edit files outside src/impliforge/ without an explicit policy update.",
-                    "Re-run test_execution and review after applying the source edit.",
-                ],
-                edits=[
-                    {
-                        "edit_kind": "replace_block",
-                        "target_symbol": "SkeletonOrchestrator._build_safe_edit_operations",
-                        "intent": "Replace append-only SAFE-EDIT source mutations with structured source edit requests.",
-                    }
-                ],
-                approval_policy="src_impliforge_structured_only",
-                safe_edit_scope="src",
-                consumability="structured_code_editor",
-            ),
-            self._build_edit_proposal(
-                proposal_id="src-structured-editor-update",
-                summary="Extend the safe editor policy to support approved src/impliforge edits through structured updates.",
-                targets=["src/impliforge/runtime/editor.py"],
-                instructions=[
-                    "Restrict edits to src/impliforge/ and preserve protected roots.",
+                    "Restrict edits to the current workspace src/ and tests/ roots.",
                     "Require approval for overwrite and delete operations.",
-                    "Record edited files in workflow artifacts after the change.",
-                ],
-                edits=[
-                    {
-                        "edit_kind": "replace_block",
-                        "target_symbol": "SafeEditor.apply",
-                        "intent": "Route approved source edits through structured update handling instead of append-only notes.",
-                    }
-                ],
-                approval_policy="src_impliforge_structured_only",
-                safe_edit_scope="src",
-                consumability="structured_code_editor",
-            ),
-            self._build_edit_proposal(
-                proposal_id="src-structured-implementation-update",
-                summary="Promote implementation proposals into structured code-edit payloads for approved source files.",
-                targets=["src/impliforge/agents/implementation.py"],
-                instructions=[
-                    "Emit structured edit payloads with explicit target symbols or blocks.",
-                    "Avoid free-form append-only source mutations.",
                     "Keep each edit proposal scoped to one behavior change.",
                 ],
                 edits=[
                     {
-                        "edit_kind": "replace_block",
-                        "target_symbol": "ImplementationAgent.run",
-                        "intent": "Emit structured edit proposals that can be consumed by a code editing runtime.",
+                        "edit_kind": "ensure_snippet",
+                        "intent": "Add a generated implementation placeholder snippet to the target workspace file.",
                     }
                 ],
-                approval_policy="src_impliforge_structured_only",
+                approval_policy="cwd_workspace_structured_only",
                 safe_edit_scope="src",
                 consumability="structured_code_editor",
             ),
@@ -103,7 +69,7 @@ class ImplementationAgent(BaseAgent):
 
         implementation = {
             "objective": objective,
-            "summary": "実装フェーズで着手すべき変更案を整理した。",
+            "summary": "実装フェーズで着手すべき変更案を整理し、target workspace 向けの generic structured edit proposal を生成した。",
             "strategy": [
                 "Keep changes small and align with the existing repository structure",
                 "Isolate Copilot SDK integration behind runtime/copilot_client.py",
@@ -113,60 +79,18 @@ class ImplementationAgent(BaseAgent):
             ],
             "proposed_modules": [
                 {
-                    "path": "src/impliforge/agents/implementation.py",
-                    "purpose": "Generate implementation proposals and concrete code-change slices.",
-                },
-                {
-                    "path": "src/impliforge/agents/documentation.py",
-                    "purpose": "Generate design and operational documentation artifacts.",
-                },
-                {
-                    "path": "src/impliforge/runtime/copilot_client.py",
-                    "purpose": "Encapsulate Copilot SDK session lifecycle and request execution.",
-                },
-                {
-                    "path": "src/impliforge/orchestration/session_manager.py",
-                    "purpose": "Manage session rotation, snapshots, and resume prompts.",
-                },
-                {
-                    "path": "src/impliforge/orchestration/state_store.py",
-                    "purpose": "Persist workflow state, summaries, and session snapshots.",
-                },
-                {
-                    "path": "src/impliforge/runtime/editor.py",
-                    "purpose": "Apply allowlisted edits safely to docs, artifacts, and approved source files.",
-                },
+                    "path": path,
+                    "purpose": "Target workspace source or test file selected from the current working directory.",
+                }
+                for path in structured_edit_targets
             ],
             "code_change_slices": [
                 {
-                    "slice_id": "implementation-agent",
-                    "goal": "Add an implementation agent that turns plans into executable change proposals.",
-                    "targets": [
-                        "src/impliforge/agents/implementation.py",
-                    ],
+                    "slice_id": "workspace-source-update",
+                    "goal": "Promote approved implementation proposals into structured source edits under the current workspace src/ and tests/ roots.",
+                    "targets": structured_edit_targets,
                     "depends_on": [
                         "planning",
-                    ],
-                },
-                {
-                    "slice_id": "documentation-agent",
-                    "goal": "Add a documentation agent that produces design and runbook artifacts.",
-                    "targets": [
-                        "src/impliforge/agents/documentation.py",
-                    ],
-                    "depends_on": [
-                        "planning",
-                    ],
-                },
-                {
-                    "slice_id": "orchestrator-integration",
-                    "goal": "Wire documentation and implementation phases into the orchestrator.",
-                    "targets": [
-                        "src/impliforge/main.py",
-                    ],
-                    "depends_on": [
-                        "implementation-agent",
-                        "documentation-agent",
                     ],
                 },
                 {
@@ -178,20 +102,7 @@ class ImplementationAgent(BaseAgent):
                         "artifacts/summaries/<workflow_id>/run-summary.json",
                     ],
                     "depends_on": [
-                        "orchestrator-integration",
-                    ],
-                },
-                {
-                    "slice_id": "src-allowlisted-edit-phase",
-                    "goal": "Promote approved implementation proposals into structured source edits under src/impliforge/.",
-                    "targets": [
-                        "src/impliforge/main.py",
-                        "src/impliforge/runtime/editor.py",
-                        "src/impliforge/agents/implementation.py",
-                    ],
-                    "depends_on": [
-                        "orchestrator-integration",
-                        "artifact-persistence",
+                        "workspace-source-update",
                     ],
                 },
             ],
@@ -200,7 +111,8 @@ class ImplementationAgent(BaseAgent):
                 "docs/final-summary.md",
                 "artifacts/workflows/<workflow_id>/workflow-details.json",
                 "artifacts/summaries/<workflow_id>/run-summary.json",
-                "src/impliforge/**/*.py allowlisted edit proposals",
+                "src/**/*.py allowlisted edit proposals",
+                "tests/**/*.py allowlisted edit proposals",
             ],
             "acceptance_criteria": acceptance_criteria,
             "constraints": constraints,
@@ -224,9 +136,9 @@ class ImplementationAgent(BaseAgent):
                         "allowed_roots": ["docs", "artifacts"],
                         "structured_code_editor_compatible": False,
                     },
-                    "src_impliforge_structured_only": {
+                    "cwd_workspace_structured_only": {
                         "approval_required": True,
-                        "allowed_roots": ["src/impliforge"],
+                        "allowed_roots": target_source_roots,
                         "structured_code_editor_compatible": True,
                     },
                 },
@@ -278,10 +190,10 @@ class ImplementationAgent(BaseAgent):
         }
 
         next_actions = [
-            "Add documentation and implementation agents to the orchestrator",
+            "Generate generic ensure-snippet targets from the current workspace src/ and tests/ roots",
             "Persist generated design and implementation proposal artifacts",
             "Extend the workflow into test_design, test_execution, and review phases",
-            "Promote structured src/impliforge edit proposals into the safe edit phase",
+            "Promote generic structured workspace edit proposals into the safe edit phase",
         ]
 
         risks = [
@@ -318,6 +230,52 @@ class ImplementationAgent(BaseAgent):
         if isinstance(value, dict):
             return value
         return {}
+
+    def _build_target_source_roots(self) -> list[str]:
+        cwd = Path.cwd()
+        roots: list[str] = []
+
+        src_root = cwd / "src"
+        tests_root = cwd / "tests"
+
+        if src_root.exists():
+            roots.append("src")
+        if tests_root.exists():
+            roots.append("tests")
+
+        if not roots:
+            roots.extend(["src", "tests"])
+
+        return roots
+
+    def _build_structured_edit_targets(
+        self,
+        roots: list[str],
+        *,
+        objective: str,
+    ) -> list[str]:
+        targets: list[str] = []
+        package_name = self._infer_package_name(objective)
+
+        for root in roots:
+            if root == "src":
+                targets.append(f"src/{package_name}/__init__.py")
+            elif root == "tests":
+                targets.append("tests/test_generated_placeholder.py")
+
+        return targets
+
+    def _infer_package_name(self, objective: str) -> str:
+        cwd_name = Path.cwd().name.strip().replace("-", "_")
+        if cwd_name:
+            return cwd_name
+
+        normalized = re.sub(r"[^a-zA-Z0-9_]+", "_", objective.strip().lower())
+        normalized = normalized.strip("_")
+        if normalized:
+            return normalized
+
+        return "app"
 
     def _normalize_list(self, value: Any) -> list[str]:
         if not isinstance(value, list):
