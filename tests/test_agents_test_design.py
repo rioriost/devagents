@@ -124,7 +124,21 @@ def test_run_builds_test_plan_document_and_metrics() -> None:
     assert "## Test Cases\n- `unit-routing-selection` (unit):" in document
     assert "  - assertion: ModelRouter returns a selected_model" in document
     assert "## Fixtures and Data\n- Sample requirement text" in document
+    assert (
+        "## Environment Assumptions\n"
+        "- Use `uv run` so execution uses the repository-managed Python environment\n"
+        "- Default execution does not require explicit Copilot SDK path overrides when environment paths are unset\n"
+        "- If `working_directory` or `config_dir` is configured, each path must already exist as a directory before SDK execution\n"
+        in document
+    )
     assert "## Validation Commands\n- uv run python -m devagents" in document
+    assert (
+        "## Operator Environment Signals\n"
+        "- Record the selected routing mode in operator-facing outputs\n"
+        "- Record token usage ratio when available for degraded-routing visibility\n"
+        "- Surface configured environment path validation failures before SDK execution\n"
+        in document
+    )
     assert "## Open Questions\n- Should review block completion?" in document
     assert "## Copilot Draft Notes\n" in document
     assert document.endswith("\n")
@@ -176,13 +190,15 @@ def test_run_uses_state_requirement_and_handles_missing_optional_inputs() -> Non
         "integration-orchestrator-flow",
         "integration-artifact-persistence",
         "e2e-cli-quality-mode",
+        "unit-environment-preflight-signals",
+        "integration-operator-environment-signals",
     ]
 
     assert result.metrics == {
         "acceptance_criteria_count": 0,
         "task_breakdown_count": 0,
         "code_change_slice_count": 0,
-        "test_case_count": 5,
+        "test_case_count": 7,
         "open_question_count": 0,
     }
 

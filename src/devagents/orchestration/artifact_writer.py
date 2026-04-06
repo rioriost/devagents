@@ -300,6 +300,22 @@ class WorkflowArtifactWriter:
             normalized_requirements.get("acceptance_criteria")
         )
         unresolved_issues = self._normalize_list(review.get("unresolved_issues"))
+        open_questions = self._merge_unique_strings(
+            state.open_questions,
+            normalized_requirements.get("open_questions", []),
+            documentation_result.outputs.get("open_questions", []),
+            review_result.outputs.get("open_questions", []),
+        )
+        resolved_decisions = self._merge_unique_strings(
+            normalized_requirements.get("resolved_decisions", []),
+            documentation_result.outputs.get("resolved_decisions", []),
+            review_result.outputs.get("resolved_decisions", []),
+        )
+        unresolved_open_questions = [
+            question
+            for question in open_questions
+            if question not in resolved_decisions
+        ]
         documentation_updated = bool(documentation_bundle) or any(
             path.startswith("docs/") for path in state.changed_files
         )
@@ -338,6 +354,11 @@ class WorkflowArtifactWriter:
                 "passed": True,
                 "details": unresolved_issues or ["none"],
             },
+            {
+                "name": "open_questions_resolved_or_deferred",
+                "passed": not unresolved_open_questions,
+                "details": unresolved_open_questions or ["none"],
+            },
         ]
 
         failed_checks = [
@@ -352,6 +373,9 @@ class WorkflowArtifactWriter:
             "test_status": test_status,
             "review_severity": review_severity,
             "unresolved_issues": unresolved_issues,
+            "open_questions": open_questions,
+            "resolved_decisions": resolved_decisions,
+            "unresolved_open_questions": unresolved_open_questions,
             "documentation_updated": documentation_updated,
         }
 
@@ -465,6 +489,9 @@ class WorkflowArtifactWriter:
                     f"- review_severity: {acceptance_gate.get('review_severity', 'unknown')}",
                     f"- documentation_updated: {bool(acceptance_gate.get('documentation_updated'))}",
                     f"- unresolved_issues: {self._format_list_or_none(acceptance_gate.get('unresolved_issues'))}",
+                    f"- open_questions: {self._format_list_or_none(acceptance_gate.get('open_questions'))}",
+                    f"- resolved_decisions: {self._format_list_or_none(acceptance_gate.get('resolved_decisions'))}",
+                    f"- unresolved_open_questions: {self._format_list_or_none(acceptance_gate.get('unresolved_open_questions'))}",
                 ]
             )
 

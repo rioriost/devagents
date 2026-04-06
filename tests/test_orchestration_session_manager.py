@@ -414,3 +414,67 @@ def test_rotate_session_without_rotation_keeps_current_session() -> None:
     assert state.session_id == "sess-current"
     assert state.parent_session_id == "sess-parent"
     assert not any("Session rotated:" in note for note in state.notes)
+
+
+def test_rotate_session_preserves_resumable_chain_across_repeated_rotations() -> None:
+    state = build_state()
+    manager = SessionManager(
+        SessionManagerConfig(
+            rotation_threshold=0.5,
+            hard_limit_threshold=0.9,
+            max_context_items=5,
+        )
+    )
+
+    first_decision, first_snapshot = manager.rotate_session(
+        state,
+        token_usage_ratio=0.7,
+        next_action="Resume implementation",
+        last_checkpoint="implementation",
+    )
+
+    first_rotated_session_id = state.session_id
+    assert first_decision.should_rotate is True
+    assert first_rotated_session_id is not None
+
+    state.add_note("post-rotation-note")
+    state.add_open_question("post-rotation-question")
+    state.add_artifact("artifacts/post-rotation.md")
+    state.add_changed_file("src/devagents/main.py")
+
+    second_decision, second_snapshot = manager.rotate_session(
+        state,
+        token_usage_ratio=0.8,
+        next_action="Resume review",
+        last_checkpoint="reviewing",
+    )
+
+    assert second_decision.should_rotate is True
+    assert first_snapshot.session_id == "sess-current"
+    assert first_snapshot.parent_session_id == "sess-parent"
+    assert first_snapshot.last_checkpoint == "implementation"
+    assert first_snapshot.next_action == "Resume implementation"
+
+    assert second_snapshot.session_id == first_rotated_session_id
+    assert second_snapshot.parent_session_id == "sess-current"
+    assert second_snapshot.last_checkpoint == "reviewing"
+    assert second_snapshot.next_action == "Resume review"
+    assert second_snapshot.persistent_context["session_id"] == first_rotated_session_id
+    assert second_snapshot.persistent_context["parent_session_id"] == "sess-current"
+    assert "post-rotation-note" in second_snapshot.persistent_context["notes"]
+    assert (
+        "post-rotation-question" in second_snapshot.persistent_context["open_questions"]
+    )
+    assert (
+        "artifacts/post-rotation.md" in second_snapshot.persistent_context["artifacts"]
+    )
+    assert (
+        "src/devagents/main.py" in second_snapshot.persistent_context["changed_files"]
+    )
+
+    assert state.parent_session_id == first_rotated_session_id
+    assert state.session_id == second_decision.next_session_id
+    assert state.session_id is not None
+    assert state.session_id != "sess-current"
+    assert second_snapshot.session_id == state.parent_session_id
+    assert sum(1 for note in state.notes if note.startswith("Session rotated:")) == 2

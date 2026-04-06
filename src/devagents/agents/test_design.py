@@ -77,9 +77,19 @@ class TestDesignAgent(BaseAgent):
                 "Deterministic routing mode input such as quality/balanced/cost_saver",
                 "Mocked or dry-run Copilot response payloads for repeatable validation",
             ],
+            "environment_assumptions": [
+                "Use `uv run` so execution uses the repository-managed Python environment",
+                "Default execution does not require explicit Copilot SDK path overrides when environment paths are unset",
+                "If `working_directory` or `config_dir` is configured, each path must already exist as a directory before SDK execution",
+            ],
             "validation_commands": [
                 'uv run python -m devagents "sample requirement" --routing-mode quality',
                 'uv run python -m devagents "sample requirement" --token-usage-ratio 0.9',
+            ],
+            "operator_environment_signals": [
+                "Record the selected routing mode in operator-facing outputs",
+                "Record token usage ratio when available for degraded-routing visibility",
+                "Surface configured environment path validation failures before SDK execution",
             ],
             "documentation_inputs": {
                 "design_present": bool(documentation_bundle.get("design")),
@@ -184,6 +194,26 @@ class TestDesignAgent(BaseAgent):
                     "artifacts list includes docs and artifacts paths",
                 ],
             },
+            {
+                "case_id": "unit-environment-preflight-signals",
+                "level": "unit",
+                "objective": "Configured SDK environment assumptions are validated before execution starts.",
+                "assertions": [
+                    "Unset environment paths keep default execution guidance valid",
+                    "Configured working_directory must exist as a directory",
+                    "Configured config_dir must exist as a directory",
+                ],
+            },
+            {
+                "case_id": "integration-operator-environment-signals",
+                "level": "integration",
+                "objective": "Operator-facing artifacts expose environment and execution signals consistently.",
+                "assertions": [
+                    "routing_mode is reflected in output",
+                    "token usage ratio is preserved when available",
+                    "environment preflight failures are surfaced in operator-facing outputs",
+                ],
+            },
         ]
 
         for index, criterion in enumerate(acceptance_criteria, start=1):
@@ -280,12 +310,34 @@ class TestDesignAgent(BaseAgent):
         lines.extend(
             [
                 "",
+                "## Environment Assumptions",
+            ]
+        )
+        lines.extend(
+            self._render_bullets(
+                self._normalize_list(test_plan.get("environment_assumptions"))
+            )
+        )
+        lines.extend(
+            [
+                "",
                 "## Validation Commands",
             ]
         )
         lines.extend(
             self._render_bullets(
                 self._normalize_list(test_plan.get("validation_commands"))
+            )
+        )
+        lines.extend(
+            [
+                "",
+                "## Operator Environment Signals",
+            ]
+        )
+        lines.extend(
+            self._render_bullets(
+                self._normalize_list(test_plan.get("operator_environment_signals"))
             )
         )
         lines.extend(

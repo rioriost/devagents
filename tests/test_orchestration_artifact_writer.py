@@ -1054,6 +1054,9 @@ def test_build_acceptance_gate_reports_ready_for_completion_when_all_checks_pass
     assert acceptance_gate["test_status"] == "passed"
     assert acceptance_gate["review_severity"] == "low"
     assert acceptance_gate["unresolved_issues"] == []
+    assert acceptance_gate["open_questions"] == []
+    assert acceptance_gate["resolved_decisions"] == []
+    assert acceptance_gate["unresolved_open_questions"] == []
 
 
 def test_build_final_summary_renders_acceptance_gate_when_present(
@@ -1069,11 +1072,18 @@ def test_build_final_summary_renders_acceptance_gate_when_present(
         {
             "acceptance_gate": {
                 "ready_for_completion": False,
-                "failed_checks": ["tests_passing", "documentation_updated"],
+                "failed_checks": [
+                    "tests_passing",
+                    "documentation_updated",
+                    "open_questions_resolved_or_deferred",
+                ],
                 "test_status": "failed",
                 "review_severity": "high",
                 "documentation_updated": False,
                 "unresolved_issues": ["missing validation"],
+                "open_questions": ["Who approves rollout?"],
+                "resolved_decisions": ["Persist workflow state"],
+                "unresolved_open_questions": ["Who approves rollout?"],
             },
             "next_actions": ["Re-run validation", "Update docs"],
         }
@@ -1105,13 +1115,72 @@ def test_build_final_summary_renders_acceptance_gate_when_present(
 
     assert "## Acceptance Gate" in summary
     assert "- ready_for_completion: False" in summary
-    assert "- failed_checks: tests_passing, documentation_updated" in summary
+    assert (
+        "- failed_checks: tests_passing, documentation_updated, open_questions_resolved_or_deferred"
+        in summary
+    )
     assert "- test_status: failed" in summary
     assert "- review_severity: high" in summary
     assert "- documentation_updated: False" in summary
     assert "- unresolved_issues: missing validation" in summary
+    assert "- open_questions: Who approves rollout?" in summary
+    assert "- resolved_decisions: Persist workflow state" in summary
+    assert "- unresolved_open_questions: Who approves rollout?" in summary
     assert "- Re-run validation" in summary
     assert "- Update docs" in summary
+
+
+def test_build_acceptance_gate_blocks_when_open_questions_remain_unresolved(
+    tmp_path: Path,
+) -> None:
+    writer = WorkflowArtifactWriter(
+        docs_dir=tmp_path / "docs",
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+    state = build_state()
+    state.add_open_question("Who approves rollout?")
+
+    acceptance_gate = writer.build_acceptance_gate(
+        state=state,
+        requirements_result=result(
+            outputs={
+                "normalized_requirements": {
+                    "objective": "x",
+                    "acceptance_criteria": ["Tests pass"],
+                    "open_questions": ["Who approves rollout?"],
+                    "resolved_decisions": [],
+                }
+            }
+        ),
+        documentation_result=result(
+            outputs={
+                "documentation_bundle": {"design": "present"},
+                "open_questions": ["Who approves rollout?"],
+                "resolved_decisions": [],
+            }
+        ),
+        test_execution_result=result(
+            outputs={"test_results": {"status": "passed", "executed_checks": []}}
+        ),
+        review_result=result(
+            outputs={
+                "review": {
+                    "severity": "low",
+                    "unresolved_issues": [],
+                    "fix_loop_required": False,
+                },
+                "open_questions": ["Who approves rollout?"],
+                "resolved_decisions": [],
+            }
+        ),
+    )
+
+    assert acceptance_gate["ready_for_completion"] is False
+    assert acceptance_gate["failed_checks"] == ["open_questions_resolved_or_deferred"]
+    assert acceptance_gate["open_questions"] == ["Who approves rollout?"]
+    assert acceptance_gate["resolved_decisions"] == []
+    assert acceptance_gate["unresolved_open_questions"] == ["Who approves rollout?"]
 
 
 def test_build_final_summary_uses_defaults_for_non_list_values_and_missing_actions(
