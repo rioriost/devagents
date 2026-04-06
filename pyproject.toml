@@ -1,10 +1,21 @@
 [project]
 name = "devagents"
 version = "0.1.0"
-description = "Add your description here"
+description = "Orchestrator-centric multi-agent workflow runner built on the GitHub Copilot SDK"
 readme = "README.md"
 authors = [
     { name = "Rio Fujita", email = "rio_github@rio.st" }
+]
+license = { file = "LICENSE" }
+keywords = ["copilot", "agents", "workflow", "orchestrator", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Testing",
 ]
 requires-python = ">=3.14"
 dependencies = [
@@ -29,5 +40,5 @@ dev = [
 devagents = "devagents:main"
 
 [build-system]
-requires = ["uv_build>=0.9.27,<0.10.0"]
-build-backend = "uv_build"
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"

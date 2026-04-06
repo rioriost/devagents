@@ -1,8 +1,8 @@
 # devagents
 
-`devagents` は、GitHub Copilot SDK を基盤にした orchestrator-centric なマルチエージェント実行ツール。
+`devagents` is an orchestrator-centric multi-agent workflow tool built on top of the GitHub Copilot SDK.
 
-要件分析、計画、ドキュメント生成、実装提案、テスト設計・実行、レビュー、修正ループ、成果物保存までを一連の workflow として扱う。
+It treats requirement analysis, planning, documentation generation, implementation proposals, test design and execution, review, fix loops, and artifact persistence as one end-to-end workflow.
 
 ## License
 
@@ -10,22 +10,24 @@ This project is licensed under the MIT License. See `LICENSE` for details.
 
 ## Features
 
-- requirements / planning / documentation / implementation / test_design / test_execution / review / fix loop を持つ workflow
-- session snapshot / restore / rotation
-- task-aware model routing
-- operator-facing run summary / final summary / review / fix artifacts
-- acceptance gating と completion evidence
-- approval-aware safe edit orchestration
+- Multi-agent workflow covering requirements, planning, documentation, implementation, test design, test execution, review, and fix loops
+- Session snapshot, restore, and rotation support
+- Task-aware model routing
+- Operator-facing run summaries, final summaries, review reports, and fix reports
+- Acceptance gating and completion evidence
+- Approval-aware safe edit orchestration
 
 ## Installation
 
-依存解決と実行は `uv` 前提。
+This project uses `uv` for dependency management and execution.
+
+Install the default dependencies:
 
 ```sh
 uv sync
 ```
 
-テスト依存も入れる場合:
+Install test dependencies as well:
 
 ```sh
 uv sync --extra test
@@ -33,15 +35,15 @@ uv sync --extra test
 
 ## CLI Usage
 
-`devagents` は**要件文字列そのものではなく、要件を書いたファイルパス**を位置引数として受け取る。
+`devagents` accepts a **requirement file path** as its positional argument, not an inline requirement string.
 
-### Basic
+### Basic usage
 
 ```sh
 uv run devagents requirements/sample-requirement.md
 ```
 
-または module 実行:
+Or run it as a module:
 
 ```sh
 uv run python -m devagents requirements/sample-requirement.md
@@ -60,27 +62,27 @@ uv run devagents requirements/sample-requirement.md \
 
 ## Requirement File Format
 
-要件ファイルは plain text / markdown を想定。複数行で書いてよい。
+Requirement files are expected to be plain text or Markdown. Multi-line requirements are supported and recommended.
 
-例:
+Example:
 
 ```md
-GitHub Copilot SDK を用いたマルチエージェント環境を構築する
+Build a multi-agent environment using the GitHub Copilot SDK
 
-- session persistence を持つこと
-- review と fix loop を含むこと
-- docs/ と artifacts/ に成果物を保存すること
+- Support session persistence
+- Include review and fix loops
+- Persist outputs under docs/ and artifacts/
 ```
 
 ## Error Handling
 
-次の場合はエラー終了する。
+The CLI exits with an error when:
 
-- 指定した要件ファイルが存在しない
-- 要件ファイルが空
-- 要件ファイルを読み取れない
+- The specified requirement file does not exist
+- The requirement file is empty
+- The requirement file cannot be read
 
-例:
+Example:
 
 ```sh
 uv run devagents requirements/missing.md
@@ -89,9 +91,9 @@ uv run devagents requirements/missing.md
 
 ## Generated Outputs
 
-主に以下を生成する。
+The workflow primarily generates the following outputs.
 
-### docs
+### Documentation outputs
 
 - `docs/design.md`
 - `docs/runbook.md`
@@ -101,7 +103,7 @@ uv run devagents requirements/missing.md
 - `docs/fix-report.md`
 - `docs/final-summary.md`
 
-### artifacts
+### Artifact outputs
 
 - `artifacts/workflow-state.json`
 - `artifacts/sessions/<session_id>/session-snapshot.json`
@@ -110,13 +112,13 @@ uv run devagents requirements/missing.md
 
 ## Validation
 
-全体テスト:
+Run the full test suite:
 
 ```sh
 uv run pytest -q tests
 ```
 
-coverage:
+Run tests with coverage:
 
 ```sh
 uv run pytest --cov=src/devagents --cov-report=term-missing:skip-covered -q tests
@@ -124,6 +126,6 @@ uv run pytest --cov=src/devagents --cov-report=term-missing:skip-covered -q test
 
 ## Notes
 
-- `docs/` と `artifacts/` への生成物保存は通常運用として扱う
-- source edit は approval-aware な経路を通す前提
-- unresolved open questions は resolved または explicitly deferred として扱う
+- Generated outputs under `docs/` and `artifacts/` are treated as normal workflow outputs
+- Source edits are expected to go through approval-aware paths
+- Open questions should be treated as either resolved or explicitly deferred
