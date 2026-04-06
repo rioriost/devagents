@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
-from orchestration_test_helpers import (
-    DummySessionManager,
-    DummyStateStore,
-    build_state,
-)
+from orchestration_test_helpers import DummySessionManager, DummyStateStore, build_state
 
+from devagents.models.routing import RoutingMode
 from devagents.orchestration.runtime_support import RuntimeSupport
 from devagents.runtime.editor import (
     ApprovalDecision,
@@ -188,3 +186,125 @@ def test_runtime_support_rotates_session_and_records_snapshot(
     assert any(path.endswith("session-snapshot.json") for path in state.artifacts)
     assert any("mid-run session rotation" in note for note in state.notes)
     assert any("pre-rotation session snapshot" in note for note in state.notes)
+
+
+def test_runtime_support_repeated_rotations_persist_each_pre_rotation_snapshot(
+    tmp_path: Path,
+) -> None:
+    state = build_state()
+    session_manager = DummySessionManager(should_rotate=True)
+    state_store = DummyStateStore(tmp_path / "artifacts")
+    runtime_support = RuntimeSupport(
+        state_store=state_store,
+        session_manager=session_manager,
+    )
+
+    runtime_support.rotate_session_if_needed(
+        state,
+        token_usage_ratio=0.91,
+        next_action="Resume review after test_execution",
+        last_checkpoint="testing",
+        persistent_context={"workflow_id": state.workflow_id},
+    )
+    first_snapshot_path = (
+        tmp_path / "artifacts" / "sessions" / "sess-test-001" / "session-snapshot.json"
+    )
+
+    state.set_session("sess-test-002", parent_session_id="sess-test-001")
+
+    runtime_support.rotate_session_if_needed(
+        state,
+        token_usage_ratio=0.93,
+        next_action="Resume finalization",
+        last_checkpoint="review",
+        persistent_context={"workflow_id": state.workflow_id},
+    )
+    second_snapshot_path = (
+        tmp_path / "artifacts" / "sessions" / "sess-test-002" / "session-snapshot.json"
+    )
+
+    assert first_snapshot_path.exists()
+    assert second_snapshot_path.exists()
+    assert first_snapshot_path != second_snapshot_path
+    assert first_snapshot_path.as_posix() in state.artifacts
+    assert second_snapshot_path.as_posix() in state.artifacts
+    assert len(session_manager.rotate_calls) == 2
+    assert (
+        sum(1 for note in state.notes if "pre-rotation session snapshot" in note) == 2
+    )
+
+
+def test_runtime_support_budget_degradation_switches_to_cost_saver() -> None:
+    state = SimpleNamespace(
+        session_snapshot=SimpleNamespace(token_usage_ratio=0.91),
+        notes=[],
+        risks=[],
+    )
+    state.add_note = state.notes.append
+    state.add_risk = state.risks.append
+    runtime_support = RuntimeSupport(
+        state_store=DummyStateStore(Path("artifacts")),
+        session_manager=DummySessionManager(),
+    )
+
+    effective_mode = runtime_support.degraded_routing_mode(
+        state,
+        routing_mode=RoutingMode.BALANCED,
+    )
+
+    assert effective_mode is RoutingMode.COST_SAVER
+    assert any("routing degraded to cost_saver mode" in note for note in state.notes)
+    assert any(
+        "High token usage triggered degraded routing mode" in risk
+        for risk in state.risks
+    )
+
+
+def test_runtime_support_budget_degradation_keeps_existing_cost_saver_mode() -> None:
+    state = SimpleNamespace(
+        session_snapshot=SimpleNamespace(token_usage_ratio=0.97),
+        notes=[],
+        risks=[],
+    )
+    state.add_note = state.notes.append
+    state.add_risk = state.risks.append
+    runtime_support = RuntimeSupport(
+        state_store=DummyStateStore(Path("artifacts")),
+        session_manager=DummySessionManager(),
+    )
+
+    effective_mode = runtime_support.degraded_routing_mode(
+        state,
+        routing_mode=RoutingMode.COST_SAVER,
+    )
+
+    assert effective_mode is RoutingMode.COST_SAVER
+    assert not any(
+        "routing degraded to cost_saver mode" in note for note in state.notes
+    )
+    assert not any(
+        "High token usage triggered degraded routing mode" in risk
+        for risk in state.risks
+    )
+
+
+def test_runtime_support_budget_degradation_ignores_missing_budget_signal() -> None:
+    state = build_state()
+    runtime_support = RuntimeSupport(
+        state_store=DummyStateStore(Path("artifacts")),
+        session_manager=DummySessionManager(),
+    )
+
+    effective_mode = runtime_support.degraded_routing_mode(
+        state,
+        routing_mode=RoutingMode.BALANCED,
+    )
+
+    assert effective_mode is RoutingMode.BALANCED
+    assert not any(
+        "routing degraded to cost_saver mode" in note for note in state.notes
+    )
+    assert not any(
+        "High token usage triggered degraded routing mode" in risk
+        for risk in state.risks
+    )

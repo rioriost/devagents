@@ -274,6 +274,30 @@ class DummyRuntimeSupport:
             }
         )
 
+    def degraded_routing_mode(
+        self,
+        state: Any,
+        *,
+        routing_mode: RoutingMode,
+    ) -> RoutingMode:
+        session_snapshot = getattr(state, "session_snapshot", None)
+        token_usage_ratio = getattr(session_snapshot, "token_usage_ratio", None)
+
+        if routing_mode is RoutingMode.COST_SAVER:
+            return routing_mode
+        if not isinstance(token_usage_ratio, int | float):
+            return routing_mode
+        if token_usage_ratio < 0.9:
+            return routing_mode
+
+        state.add_note(
+            "budget-like token usage signal exceeded threshold; routing degraded to cost_saver mode."
+        )
+        state.add_risk(
+            "High token usage triggered degraded routing mode; output quality may be reduced until budget pressure clears."
+        )
+        return RoutingMode.COST_SAVER
+
 
 class DummyEditPhase:
     def __init__(self) -> None:
@@ -340,11 +364,16 @@ def make_state() -> Any:
     return state
 
 
-def make_orchestrator(tmp_path: Path) -> SkeletonOrchestrator:
+def make_orchestrator(
+    tmp_path: Path,
+    *,
+    routing_mode: RoutingMode = RoutingMode.BALANCED,
+) -> SkeletonOrchestrator:
     orchestrator = SkeletonOrchestrator(
         model="gpt-5.4",
         artifacts_dir=tmp_path / "artifacts",
         docs_dir=tmp_path / "docs",
+        routing_mode=routing_mode,
     )
     orchestrator.model_router = DummyModelRouter()
     orchestrator.copilot_client = DummyCopilotClient()
@@ -725,13 +754,15 @@ def test_run_fix_loop_runs_fix_and_reruns_validation(tmp_path: Path) -> None:
     assert len(fix_calls) == 1
     assert len(test_calls) == 1
     assert len(review_calls) == 1
-    assert test_calls[0]["implementation_result"] is implementation_result
+    assert test_calls[0]["implementation_result"].outputs["implementation"] == {
+        "changes": ["patch"]
+    }
     assert review_calls[0]["test_execution_result"] is rerun_test_result
     assert any(
-        "fix loop を開始した。" in note
+        "fix loop を開始した。attempt=1/2" in note
         for note in state.require_task("implementation").notes
     )
-    assert any("fix loop を 1 回実行" in note for note in state.notes)
+    assert any("fix loop を 1 回目として実行" in note for note in state.notes)
 
 
 def test_run_completes_full_flow_and_writes_artifacts(tmp_path: Path) -> None:
@@ -825,6 +856,11 @@ def test_run_completes_full_flow_and_writes_artifacts(tmp_path: Path) -> None:
     assert rotate_call["last_checkpoint"] == WorkflowPhase.TESTING.value
     assert rotate_call["persistent_context"]["test_results"] == {"status": "passed"}
 
+    assert len(orchestrator.model_router.calls) == 7
+    assert all(
+        call["mode"] is RoutingMode.BALANCED for call in orchestrator.model_router.calls
+    )
+
     assert len(orchestrator.edit_phase.calls) == 1
     edit_call = orchestrator.edit_phase.calls[0]
     assert edit_call["requirement"] == "Build a multi-agent workflow"
@@ -852,6 +888,177 @@ def test_run_completes_full_flow_and_writes_artifacts(tmp_path: Path) -> None:
     assert snapshot_call["token_usage_ratio"] == 0.61
     assert snapshot_call["last_checkpoint"] == WorkflowPhase.REVIEWING.value
     assert "Promote safe edit outputs" in snapshot_call["next_action"]
+
+
+def test_run_degrades_routing_to_cost_saver_when_budget_signal_is_high(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    orchestrator.requirements_agent = DummyAgent(
+        "requirements",
+        make_result(
+            summary="requirements done",
+            outputs={"normalized_requirements": {"objective": "Build workflow"}},
+        ),
+    )
+    orchestrator.planning_agent = DummyAgent(
+        "planner",
+        make_result(summary="planning done", outputs={"plan": {"phases": ["plan"]}}),
+    )
+    orchestrator.documentation_agent = DummyAgent(
+        "documentation",
+        make_result(
+            summary="documentation done",
+            outputs={"documentation_bundle": {"design_doc": "doc text"}},
+        ),
+    )
+    orchestrator.implementation_agent = DummyAgent(
+        "implementation",
+        make_result(
+            summary="implementation done",
+            outputs={"implementation": {"changes": ["src/devagents/main.py"]}},
+        ),
+    )
+    orchestrator.test_design_agent = DummyAgent(
+        "test-design",
+        make_result(
+            summary="test design done",
+            outputs={
+                "test_plan": {"cases": ["parser", "orchestrator"]},
+                "test_plan_document": "# test plan",
+            },
+        ),
+    )
+    orchestrator.test_execution_agent = DummyAgent(
+        "test-execution",
+        make_result(
+            summary="test execution done",
+            outputs={
+                "test_results": {"status": "passed"},
+                "test_results_document": "# test results",
+            },
+        ),
+    )
+    orchestrator.review_agent = DummyAgent(
+        "review",
+        make_result(
+            summary="review done",
+            outputs={
+                "review": {"fix_loop_required": False},
+                "review_report": "# review report",
+            },
+        ),
+    )
+    orchestrator.fixer_agent = DummyAgent(
+        "fixer",
+        make_result(summary="fix done", outputs={"implementation": {"changes": []}}),
+    )
+
+    state = asyncio.run(
+        orchestrator.run(
+            "Build a multi-agent workflow",
+            token_usage_ratio=0.97,
+        )
+    )
+
+    assert state.phase is WorkflowPhase.COMPLETED
+    assert len(orchestrator.model_router.calls) == 7
+    assert all(
+        call["mode"] is RoutingMode.BALANCED for call in orchestrator.model_router.calls
+    )
+    assert not any(
+        "routing degraded to cost_saver mode" in note for note in state.notes
+    )
+    assert not any(
+        "High token usage triggered degraded routing mode" in risk
+        for risk in state.risks
+    )
+
+
+def test_run_does_not_duplicate_budget_degraded_note_when_already_cost_saver(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path, routing_mode=RoutingMode.COST_SAVER)
+    orchestrator.requirements_agent = DummyAgent(
+        "requirements",
+        make_result(
+            summary="requirements done",
+            outputs={"normalized_requirements": {"objective": "Build workflow"}},
+        ),
+    )
+    orchestrator.planning_agent = DummyAgent(
+        "planner",
+        make_result(summary="planning done", outputs={"plan": {"phases": ["plan"]}}),
+    )
+    orchestrator.documentation_agent = DummyAgent(
+        "documentation",
+        make_result(
+            summary="documentation done",
+            outputs={"documentation_bundle": {"design_doc": "doc text"}},
+        ),
+    )
+    orchestrator.implementation_agent = DummyAgent(
+        "implementation",
+        make_result(
+            summary="implementation done",
+            outputs={"implementation": {"changes": ["src/devagents/main.py"]}},
+        ),
+    )
+    orchestrator.test_design_agent = DummyAgent(
+        "test-design",
+        make_result(
+            summary="test design done",
+            outputs={
+                "test_plan": {"cases": ["parser", "orchestrator"]},
+                "test_plan_document": "# test plan",
+            },
+        ),
+    )
+    orchestrator.test_execution_agent = DummyAgent(
+        "test-execution",
+        make_result(
+            summary="test execution done",
+            outputs={
+                "test_results": {"status": "passed"},
+                "test_results_document": "# test results",
+            },
+        ),
+    )
+    orchestrator.review_agent = DummyAgent(
+        "review",
+        make_result(
+            summary="review done",
+            outputs={
+                "review": {"fix_loop_required": False},
+                "review_report": "# review report",
+            },
+        ),
+    )
+    orchestrator.fixer_agent = DummyAgent(
+        "fixer",
+        make_result(summary="fix done", outputs={"implementation": {"changes": []}}),
+    )
+
+    state = asyncio.run(
+        orchestrator.run(
+            "Build a multi-agent workflow",
+            token_usage_ratio=0.97,
+        )
+    )
+
+    assert state.phase is WorkflowPhase.COMPLETED
+    assert len(orchestrator.model_router.calls) == 7
+    assert all(
+        call["mode"] is RoutingMode.COST_SAVER
+        for call in orchestrator.model_router.calls
+    )
+    assert not any(
+        "routing degraded to cost_saver mode" in note for note in state.notes
+    )
+    assert not any(
+        "High token usage triggered degraded routing mode" in risk
+        for risk in state.risks
+    )
 
 
 def test_run_rotates_session_and_persists_artifacts_across_fix_loop(
@@ -1084,7 +1291,7 @@ def test_run_rotates_session_and_persists_artifacts_across_fix_loop(
     assert snapshot_call["last_checkpoint"] == WorkflowPhase.REVIEWING.value
     assert "Promote safe edit outputs" in snapshot_call["next_action"]
 
-    assert any("fix loop を 1 回実行" in note for note in state.notes)
+    assert any("fix loop を 1 回目として実行" in note for note in state.notes)
     assert any("fix proposal を生成した。" in note for note in state.notes)
 
 
@@ -1368,11 +1575,177 @@ def test_run_fix_loop_records_escalation_note_when_rerun_test_execution_fails(
 
     assert result is rerun_test_result
     assert any(
-        "fix loop を開始した。" in note
+        "fix loop を開始した。attempt=1/2" in note
         for note in state.require_task("implementation").notes
     )
+
+
+def test_run_fix_loop_escalates_after_retry_limit(tmp_path: Path) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+    state.retry_counters["fix_loop"] = 2
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        raise AssertionError(
+            "fix phase should not execute after retry limit escalation"
+        )
+
+    async def fake_test_execution(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+    ) -> AgentResult:
+        raise AssertionError(
+            "test execution rerun should not execute after retry limit escalation"
+        )
+
+    async def fake_review_phase(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        documentation_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+        test_execution_result: AgentResult,
+    ) -> AgentResult:
+        raise AssertionError(
+            "review rerun should not execute after retry limit escalation"
+        )
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(
+                outputs={"normalized_requirements": {"objective": "x"}}
+            ),
+            planning_result=make_result(outputs={"plan": {"steps": ["a"]}}),
+            documentation_result=make_result(
+                outputs={"documentation_bundle": {"doc": "x"}}
+            ),
+            implementation_result=make_result(
+                outputs={"implementation": {"changes": ["base"]}}
+            ),
+            test_design_result=make_result(outputs={"test_plan": {"cases": ["c1"]}}),
+            test_execution_result=make_result(
+                outputs={"test_results": {"status": "failed"}}
+            ),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result.is_success is False
+    assert result.failure_category == "fix_loop_retry_limit"
+    assert result.outputs["review"]["fix_loop_attempt"] == 3
+    assert result.outputs["review"]["fix_loop_retry_limit"] == 2
+    assert result.outputs["review"]["escalation_required"] is True
+    assert result.next_actions == [
+        "Escalate to a human reviewer",
+        "Resolve the blocking review findings manually",
+        "Re-run fix loop only after human guidance is recorded",
+    ]
+    assert state.phase is WorkflowPhase.NEEDS_HUMAN_INPUT
+    assert state.retry_counters["fix_loop"] == 3
+    assert any("retry limit" in risk for risk in state.risks)
+    assert any("人手エスカレーション" in note for note in state.notes)
+    assert state.require_task("review").status is TaskStatus.BLOCKED
+    assert state.require_task("implementation").status is TaskStatus.BLOCKED
     assert any(
         "escalation" in note or "エスカレーション" in note for note in state.notes
+    )
+
+
+def test_run_fix_loop_uses_fix_outputs_for_repeated_rerun_inputs(
+    tmp_path: Path,
+) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    fix_result = make_result(
+        summary="fix ready",
+        outputs={
+            "implementation": {"changes": ["patched-file"]},
+            "fix_report": "# fix report",
+        },
+    )
+    rerun_test_result = make_result(
+        summary="tests rerun",
+        outputs={"test_results": {"status": "passed"}},
+    )
+    rerun_review_result = make_result(
+        summary="review rerun",
+        outputs={"review": {"fix_loop_required": False}},
+    )
+
+    rerun_inputs: list[dict[str, Any]] = []
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        return fix_result
+
+    async def fake_test_execution(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+    ) -> AgentResult:
+        rerun_inputs.append(
+            {
+                "state": state_arg,
+                "implementation_result": implementation_result,
+            }
+        )
+        return rerun_test_result
+
+    async def fake_review_phase(
+        state_arg: Any,
+        requirements_result: AgentResult,
+        planning_result: AgentResult,
+        documentation_result: AgentResult,
+        implementation_result: AgentResult,
+        test_design_result: AgentResult,
+        test_execution_result: AgentResult,
+    ) -> AgentResult:
+        return rerun_review_result
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(
+                outputs={"normalized_requirements": {"objective": "x"}}
+            ),
+            planning_result=make_result(outputs={"plan": {"steps": ["a"]}}),
+            documentation_result=make_result(
+                outputs={"documentation_bundle": {"doc": "x"}}
+            ),
+            implementation_result=make_result(
+                outputs={"implementation": {"changes": ["base"]}}
+            ),
+            test_design_result=make_result(outputs={"test_plan": {"cases": ["c1"]}}),
+            test_execution_result=make_result(
+                outputs={"test_results": {"status": "failed"}}
+            ),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result is fix_result
+    assert len(rerun_inputs) == 1
+    assert rerun_inputs[0]["state"] is state
+    assert rerun_inputs[0]["implementation_result"].outputs["implementation"] == {
+        "changes": ["patched-file"]
+    }
+    assert rerun_inputs[0]["implementation_result"].outputs["fix_report"] == (
+        "# fix report"
     )
 
 
@@ -1667,6 +2040,119 @@ def test_run_cli_omits_rotation_reason_when_empty(
     assert exit_code == 0
     assert "rotate_session: False" in captured
     assert "rotation_reason:" not in captured
+
+
+def test_run_cli_e2e_style_flow_surfaces_multi_phase_artifacts_and_summary(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    state = make_state()
+    state.set_phase(WorkflowPhase.COMPLETED)
+    state.model = "gpt-5.4-mini"
+    state.set_session("sess-e2e", parent_session_id="sess-parent")
+    state.update_task_status("requirements_analysis", TaskStatus.COMPLETED)
+    state.update_task_status("planning", TaskStatus.COMPLETED)
+    state.update_task_status("documentation", TaskStatus.COMPLETED)
+    state.update_task_status("implementation", TaskStatus.COMPLETED)
+    state.update_task_status("test_design", TaskStatus.COMPLETED)
+    state.update_task_status("test_execution", TaskStatus.COMPLETED)
+    state.update_task_status("review", TaskStatus.COMPLETED)
+    state.update_task_status("finalization", TaskStatus.BLOCKED)
+    state.add_artifact("docs/design.md")
+    state.add_artifact("docs/runbook.md")
+    state.add_artifact("docs/test-plan.md")
+    state.add_artifact("docs/test-results.md")
+    state.add_artifact("docs/review-report.md")
+    state.add_artifact("docs/fix-report.md")
+    state.add_artifact("artifacts/summaries/wf-test-main/run-summary.json")
+    state.add_artifact("docs/final-summary.md")
+
+    created: list[Any] = []
+
+    class FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            model: str,
+            artifacts_dir: Path,
+            docs_dir: Path,
+            routing_mode: RoutingMode,
+        ) -> None:
+            self.model = model
+            self.artifacts_dir = artifacts_dir
+            self.docs_dir = docs_dir
+            self.routing_mode = routing_mode
+            self.session_manager = DummySessionManager(should_rotate=True)
+            self.run_calls: list[dict[str, Any]] = []
+            created.append(self)
+
+        async def run(
+            self,
+            requirement: str,
+            *,
+            token_usage_ratio: float = 0.35,
+        ) -> Any:
+            self.run_calls.append(
+                {
+                    "requirement": requirement,
+                    "token_usage_ratio": token_usage_ratio,
+                }
+            )
+            return state
+
+    monkeypatch.setattr(main_module, "SkeletonOrchestrator", FakeOrchestrator)
+
+    exit_code = asyncio.run(
+        _run_cli(
+            requirement="Build a multi-agent workflow",
+            model="gpt-5.4",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            docs_dir=str(tmp_path / "docs"),
+            token_usage_ratio=0.88,
+            routing_mode=RoutingMode.BALANCED.value,
+        )
+    )
+
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert len(created) == 1
+    fake = created[0]
+    assert fake.run_calls == [
+        {
+            "requirement": "Build a multi-agent workflow",
+            "token_usage_ratio": 0.88,
+        }
+    ]
+    assert fake.session_manager.should_rotate_calls == [
+        {
+            "token_usage_ratio": 0.88,
+            "current_session_id": "sess-e2e",
+        }
+    ]
+    assert "workflow_id: wf-test-main" in captured
+    assert "phase: completed" in captured
+    assert "model: gpt-5.4-mini" in captured
+    assert "routing_mode: balanced" in captured
+    assert "task_summary:" in captured
+    assert "  - requirements_analysis: completed" in captured
+    assert "  - documentation: completed" in captured
+    assert "  - implementation: completed" in captured
+    assert "  - test_design: completed" in captured
+    assert "  - test_execution: completed" in captured
+    assert "  - review: completed" in captured
+    assert "  - finalization: blocked" in captured
+    assert "session_id: sess-e2e" in captured
+    assert "rotate_session: True" in captured
+    assert "rotation_reason: threshold exceeded" in captured
+    assert "artifacts:" in captured
+    assert "  - docs/design.md" in captured
+    assert "  - docs/runbook.md" in captured
+    assert "  - docs/test-plan.md" in captured
+    assert "  - docs/test-results.md" in captured
+    assert "  - docs/review-report.md" in captured
+    assert "  - docs/fix-report.md" in captured
+    assert "  - artifacts/summaries/wf-test-main/run-summary.json" in captured
+    assert "  - docs/final-summary.md" in captured
 
 
 def test_main_parses_args_and_runs_cli(monkeypatch: Any) -> None:

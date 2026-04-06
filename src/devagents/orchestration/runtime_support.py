@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from devagents.models.routing import RoutingMode
 from devagents.orchestration.state_store import StateStore
 from devagents.orchestration.workflow import WorkflowState
 from devagents.runtime.editor import (
@@ -17,6 +18,8 @@ from devagents.runtime.editor import (
     approve_docs_and_artifacts_only,
     has_edit_risk_flag,
 )
+
+BUDGET_DEGRADED_TOKEN_USAGE_RATIO = 0.9
 
 
 class SessionManagerLike(Protocol):
@@ -70,6 +73,35 @@ class RuntimeSupport:
         state.add_note(
             f"pre-rotation session snapshot を保存した: {previous_session_id}"
         )
+
+    def degraded_routing_mode(
+        self,
+        state: WorkflowState,
+        *,
+        routing_mode: RoutingMode,
+    ) -> RoutingMode:
+        """Downgrade routing mode when budget-like session pressure is high."""
+        if routing_mode is RoutingMode.COST_SAVER:
+            return routing_mode
+
+        session_snapshot = getattr(state, "session_snapshot", None)
+        if session_snapshot is None:
+            return routing_mode
+
+        token_usage_ratio = getattr(session_snapshot, "token_usage_ratio", None)
+        if not isinstance(token_usage_ratio, int | float):
+            return routing_mode
+
+        if token_usage_ratio < BUDGET_DEGRADED_TOKEN_USAGE_RATIO:
+            return routing_mode
+
+        state.add_note(
+            "budget-like token usage signal exceeded threshold; routing degraded to cost_saver mode."
+        )
+        state.add_risk(
+            "High token usage triggered degraded routing mode; output quality may be reduced until budget pressure clears."
+        )
+        return RoutingMode.COST_SAVER
 
     def approval_hook(
         self,

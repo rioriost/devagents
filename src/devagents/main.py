@@ -46,6 +46,7 @@ from devagents.runtime.editor import EditorPolicy, SafeEditor
 ARTIFACTS_DIR = Path("artifacts")
 DOCS_DIR = Path("docs")
 DEFAULT_MODEL = "gpt-5.4"
+FIX_LOOP_RETRY_LIMIT = 2
 
 
 class SkeletonOrchestrator:
@@ -639,8 +640,48 @@ class SkeletonOrchestrator:
             state.add_note("review 結果に blocking issue がないため fix loop は不要。")
             return None
 
+        fix_loop_attempt = state.increment_retry("fix_loop")
+        if fix_loop_attempt > FIX_LOOP_RETRY_LIMIT:
+            state.set_phase(WorkflowPhase.NEEDS_HUMAN_INPUT)
+            state.add_risk(
+                "fix loop retry limit に達したため、自動修正を停止して人手エスカレーションが必要"
+            )
+            state.add_note(
+                "fix loop retry limit を超えたため、自動 fix loop を停止し、人手エスカレーションに切り替える。"
+            )
+            state.require_task("review").mark_blocked(
+                "fix loop retry limit exceeded; human escalation required"
+            )
+            state.require_task("implementation").mark_blocked(
+                "fix loop retry limit exceeded; human escalation required"
+            )
+            return AgentResult.failure(
+                "fix loop retry limit exceeded",
+                outputs={
+                    "review": {
+                        **review,
+                        "fix_loop_required": True,
+                        "fix_loop_attempt": fix_loop_attempt,
+                        "fix_loop_retry_limit": FIX_LOOP_RETRY_LIMIT,
+                        "escalation_required": True,
+                    }
+                },
+                risks=[
+                    "fix loop retry limit に達したため、自動修正を停止して人手エスカレーションが必要"
+                ],
+                next_actions=[
+                    "Escalate to a human reviewer",
+                    "Resolve the blocking review findings manually",
+                    "Re-run fix loop only after human guidance is recorded",
+                ],
+                failure_category="fix_loop_retry_limit",
+                failure_cause="automatic fix loop exceeded retry limit",
+            )
+
         task = state.require_task("implementation")
-        task.add_note("fix loop を開始した。")
+        task.add_note(
+            f"fix loop を開始した。attempt={fix_loop_attempt}/{FIX_LOOP_RETRY_LIMIT}"
+        )
 
         fix_result = await self._run_fix_phase(
             state,
@@ -655,11 +696,47 @@ class SkeletonOrchestrator:
         if not fix_result.is_success:
             return fix_result
 
+        rerun_implementation_result = AgentResult.success(
+            fix_result.summary,
+            outputs={
+                **implementation_result.outputs,
+                **fix_result.outputs,
+            },
+            artifacts=[
+                *implementation_result.artifacts,
+                *[
+                    artifact
+                    for artifact in fix_result.artifacts
+                    if artifact not in implementation_result.artifacts
+                ],
+            ],
+            risks=[
+                *implementation_result.risks,
+                *[
+                    risk
+                    for risk in fix_result.risks
+                    if risk not in implementation_result.risks
+                ],
+            ],
+            next_actions=[
+                *implementation_result.next_actions,
+                *[
+                    action
+                    for action in fix_result.next_actions
+                    if action not in implementation_result.next_actions
+                ],
+            ],
+            metrics={
+                **implementation_result.metrics,
+                **fix_result.metrics,
+            },
+        )
+
         rerun_test_execution_result = await self._run_test_execution_phase(
             state,
             requirements_result,
             planning_result,
-            implementation_result,
+            rerun_implementation_result,
             test_design_result,
         )
         if not rerun_test_execution_result.is_success:
@@ -684,7 +761,7 @@ class SkeletonOrchestrator:
             return rerun_review_result
 
         state.add_note(
-            "fix loop を 1 回実行し、test_execution と review を再実行した。"
+            f"fix loop を {fix_loop_attempt} 回目として実行し、test_execution と review を再実行した。"
         )
         return fix_result
 
@@ -794,7 +871,10 @@ class SkeletonOrchestrator:
         routing_decision = self.model_router.route_task(
             task.task_id,
             difficulty=difficulty,
-            mode=self.routing_mode,
+            mode=self.runtime_support.degraded_routing_mode(
+                state,
+                routing_mode=self.routing_mode,
+            ),
             retry_count=state.retry_counters.get(task.task_id, 0),
             estimated_input_tokens=estimated_input_tokens,
         )
