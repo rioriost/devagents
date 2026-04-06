@@ -79,6 +79,60 @@ def test_runtime_support_approval_hook_applies_expected_policy(
     )
 
 
+def test_runtime_support_approval_hook_denies_protected_src_root(
+    tmp_path: Path,
+) -> None:
+    runtime_support = RuntimeSupport(
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    request = EditRequest(
+        relative_path="src/other/module.py",
+        operation=EditOperationKind.WRITE,
+        content="print('blocked')\n",
+    )
+
+    result = runtime_support.approval_hook(
+        request,
+        tmp_path / "src" / "other" / "module.py",
+    )
+
+    assert result.decision == ApprovalDecision.DENIED
+    assert (
+        result.reason
+        == "target is outside the allowed docs/artifacts/src/devagents approval scope"
+    )
+
+
+def test_runtime_support_approval_hook_denies_broad_overwrite_intent(
+    tmp_path: Path,
+) -> None:
+    runtime_support = RuntimeSupport(
+        state_store=DummyStateStore(tmp_path / "artifacts"),
+        session_manager=DummySessionManager(),
+    )
+
+    request = EditRequest(
+        relative_path="src/devagents/main.py",
+        operation=EditOperationKind.WRITE,
+        content="print('ok')\n",
+        reason="Replace large implementation block with regenerated content",
+        risk_flags=(EditRiskFlag.BROAD_OVERWRITE,),
+    )
+
+    result = runtime_support.approval_hook(
+        request,
+        tmp_path / "src" / "devagents" / "main.py",
+    )
+
+    assert result.decision == ApprovalDecision.DENIED
+    assert (
+        result.reason
+        == "dependency additions, environment changes, and security-impacting src/devagents edits require explicit human approval"
+    )
+
+
 def test_runtime_support_approval_hook_denies_dependency_addition_intent(
     tmp_path: Path,
 ) -> None:

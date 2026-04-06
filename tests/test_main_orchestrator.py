@@ -30,16 +30,32 @@ class DummyRoutingDecision:
         selected_model: str = "gpt-5.4-mini",
         fallback_model: str = "gpt-5.4",
         reason: str = "balanced route",
+        task_kind: str = "planning",
+        mode: str = "balanced",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.selected_model = selected_model
         self.fallback_model = fallback_model
         self.reason = reason
+        self.task_kind = task_kind
+        self.mode = mode
+        self.metadata = metadata or {
+            "required_tags": ["analysis", "reasoning"],
+            "estimated_input_tokens": 21,
+            "retry_count": 0,
+            "fallback_reason": "alternate_available",
+            "fallback_triggered": False,
+            "retry_aware_selection": False,
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "selected_model": self.selected_model,
             "fallback_model": self.fallback_model,
             "reason": self.reason,
+            "task_kind": self.task_kind,
+            "mode": self.mode,
+            "metadata": self.metadata,
         }
 
 
@@ -591,6 +607,16 @@ def test_execute_phase_routes_builds_agent_task_and_updates_state(
     assert request.task_type is CopilotTaskType.PLANNING
     assert request.metadata["task_id"] == "planning"
     assert request.metadata["routing_decision"]["selected_model"] == "gpt-5.4-mini"
+    assert request.metadata["routing_decision"]["task_kind"] == "planning"
+    assert request.metadata["routing_decision"]["mode"] == "balanced"
+    assert request.metadata["routing_decision"]["metadata"] == {
+        "required_tags": ["analysis", "reasoning"],
+        "estimated_input_tokens": 21,
+        "retry_count": 0,
+        "fallback_reason": "alternate_available",
+        "fallback_triggered": False,
+        "retry_aware_selection": False,
+    }
 
     assert len(agent.calls) == 1
     task = agent.calls[0]
@@ -598,6 +624,11 @@ def test_execute_phase_routes_builds_agent_task_and_updates_state(
     assert task.inputs["copilot_response"] == "copilot draft"
     assert task.inputs["selected_model"] == "gpt-5.4-mini"
     assert task.inputs["routing_decision"]["fallback_model"] == "gpt-5.4"
+    assert task.inputs["routing_decision"]["task_kind"] == "planning"
+    assert (
+        task.inputs["routing_decision"]["metadata"]["fallback_reason"]
+        == "alternate_available"
+    )
     assert task.metadata == {
         "selected_model": "gpt-5.4-mini",
         "fallback_model": "gpt-5.4",
@@ -880,6 +911,26 @@ def test_run_completes_full_flow_and_writes_artifacts(tmp_path: Path) -> None:
     workflow_call = orchestrator.artifact_writer.workflow_calls[0]
     assert workflow_call["state"] is state
     assert workflow_call["requirement"] == "Build a multi-agent workflow"
+    assert workflow_call["requirements_result"].outputs["normalized_requirements"] == {
+        "objective": "Build workflow"
+    }
+    assert workflow_call["planning_result"].outputs["plan"] == {"phases": ["plan"]}
+    assert workflow_call["documentation_result"].outputs["documentation_bundle"] == {
+        "design_doc": "doc text"
+    }
+    assert workflow_call["implementation_result"].outputs["implementation"] == {
+        "changes": ["src/devagents/main.py"]
+    }
+    assert workflow_call["test_design_result"].outputs["test_plan"] == {
+        "cases": ["parser", "orchestrator"]
+    }
+    assert workflow_call["test_execution_result"].outputs["test_results"] == {
+        "status": "passed"
+    }
+    assert workflow_call["review_result"].outputs["review"] == {
+        "fix_loop_required": False
+    }
+    assert workflow_call["fix_result"] is None
     assert workflow_call["session_snapshot"].session_id == "sess-started"
 
     assert len(orchestrator.session_manager.start_calls) == 1
@@ -1251,6 +1302,9 @@ def test_run_rotates_session_and_persists_artifacts_across_fix_loop(
         )
     )
 
+    workflow_call = orchestrator.artifact_writer.workflow_calls[0]
+    edit_call = orchestrator.edit_phase.calls[0]
+
     assert state.phase is WorkflowPhase.COMPLETED
     assert len(orchestrator.runtime_support.rotate_calls) == 1
     rotate_call = orchestrator.runtime_support.rotate_calls[0]
@@ -1278,12 +1332,50 @@ def test_run_rotates_session_and_persists_artifacts_across_fix_loop(
         "review-report.md",
     ]
     assert len(orchestrator.artifact_writer.workflow_calls) == 1
-    workflow_call = orchestrator.artifact_writer.workflow_calls[0]
     assert workflow_call["state"] is state
+    assert workflow_call["requirements_result"].outputs["normalized_requirements"] == {
+        "objective": "Build workflow"
+    }
+    assert workflow_call["planning_result"].outputs["plan"] == {"phases": ["plan"]}
+    assert workflow_call["documentation_result"].outputs["documentation_bundle"] == {
+        "design_doc": "doc text"
+    }
+    assert workflow_call["implementation_result"].outputs["implementation"] == {
+        "changes": [
+            "src/devagents/main.py",
+            "tests/test_main_orchestrator.py",
+        ]
+    }
+    assert workflow_call["test_design_result"].outputs["test_plan"] == {
+        "cases": ["parser", "orchestrator"]
+    }
+    assert workflow_call["test_execution_result"].outputs["test_results"] == {
+        "status": "passed"
+    }
+    assert workflow_call["review_result"].outputs["review"] == {
+        "fix_loop_required": False
+    }
+    assert workflow_call["implementation_result"].outputs["implementation"] == {
+        "changes": [
+            "src/devagents/main.py",
+            "tests/test_main_orchestrator.py",
+        ]
+    }
     assert workflow_call["fix_result"].outputs["implementation"]["changes"] == [
         "src/devagents/main.py",
         "tests/test_main_orchestrator.py",
     ]
+    assert len(orchestrator.edit_phase.calls) == 1
+    assert edit_call["implementation_result"].outputs["implementation"] == {
+        "changes": [
+            "src/devagents/main.py",
+            "tests/test_main_orchestrator.py",
+        ]
+    }
+    assert edit_call["test_execution_result"].outputs["test_results"] == {
+        "status": "passed"
+    }
+    assert edit_call["review_result"].outputs["review"] == {"fix_loop_required": False}
 
     assert len(orchestrator.session_manager.snapshot_calls) == 1
     snapshot_call = orchestrator.session_manager.snapshot_calls[0]
@@ -1711,6 +1803,9 @@ def test_run_fix_loop_uses_fix_outputs_for_repeated_rerun_inputs(
         test_design_result: AgentResult,
         test_execution_result: AgentResult,
     ) -> AgentResult:
+        assert implementation_result.outputs["implementation"] == {
+            "changes": ["patched-file"]
+        }
         return rerun_review_result
 
     orchestrator._run_fix_phase = fake_fix_phase

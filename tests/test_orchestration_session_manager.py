@@ -328,6 +328,42 @@ def test_restore_context_recovers_task_statuses_from_persistent_context() -> Non
     assert state.require_task("finalization").status.value == "pending"
 
 
+def test_restore_context_accepts_persisted_resume_summary_and_prompt_fields() -> None:
+    state = create_workflow_state(
+        workflow_id="wf-restore-summary",
+        requirement="Recover persisted resume summary and prompt fields",
+        model="gpt-5.4",
+    )
+    snapshot = SessionSnapshot(
+        session_id="sess-summary-restore",
+        parent_session_id="sess-parent",
+        persistent_context={
+            "workflow_id": "wf-restore-summary",
+            "requirement": "Recover persisted resume summary and prompt fields",
+            "phase": state.phase.value,
+            "session_id": "sess-summary-restore",
+            "completed_tasks": ["requirements_analysis"],
+            "pending_tasks": ["planning"],
+            "next_action": "Resume planning",
+            "latest_summary": "Requirements normalized and ready for planning.",
+            "resume_prompt": "Resume planning with the persisted context.",
+        },
+    )
+
+    manager = SessionManager()
+    restored = manager.restore_context(state, snapshot)
+
+    assert restored is state
+    assert state.session_id == "sess-summary-restore"
+    assert state.parent_session_id == "sess-parent"
+    assert state.require_task("requirements_analysis").status.value == "completed"
+    assert state.require_task("planning").status.value == "pending"
+    assert any(
+        note == "Session restored from snapshot: sess-summary-restore"
+        for note in state.notes
+    )
+
+
 def test_rotate_session_returns_snapshot_and_updates_state_when_rotation_occurs() -> (
     None
 ):

@@ -221,16 +221,145 @@ class SkeletonOrchestrator:
         if fix_result is not None and not fix_result.is_success:
             return state
 
+        effective_implementation_result = implementation_result
+        effective_test_execution_result = test_execution_result
+        effective_review_result = review_result
+        if fix_result is not None:
+            rerun_implementation_outputs = {
+                **implementation_result.outputs,
+                **fix_result.outputs,
+            }
+            effective_implementation_result = AgentResult.success(
+                fix_result.summary,
+                outputs=rerun_implementation_outputs,
+                artifacts=[
+                    *implementation_result.artifacts,
+                    *[
+                        artifact
+                        for artifact in fix_result.artifacts
+                        if artifact not in implementation_result.artifacts
+                    ],
+                ],
+                risks=[
+                    *implementation_result.risks,
+                    *[
+                        risk
+                        for risk in fix_result.risks
+                        if risk not in implementation_result.risks
+                    ],
+                ],
+                next_actions=[
+                    *implementation_result.next_actions,
+                    *[
+                        action
+                        for action in fix_result.next_actions
+                        if action not in implementation_result.next_actions
+                    ],
+                ],
+                metrics={
+                    **implementation_result.metrics,
+                    **fix_result.metrics,
+                },
+            )
+            rerun_test_execution_task = state.require_task("test_execution")
+            rerun_review_task = state.require_task("review")
+            rerun_test_execution_outputs = rerun_test_execution_task.outputs
+            rerun_review_outputs = rerun_review_task.outputs
+            rerun_test_execution_artifacts = [
+                *test_execution_result.artifacts,
+                *[
+                    artifact
+                    for artifact in rerun_test_execution_outputs.get("artifacts", [])
+                    if artifact not in test_execution_result.artifacts
+                ],
+            ]
+            rerun_test_execution_risks = [
+                *test_execution_result.risks,
+                *[
+                    risk
+                    for risk in rerun_test_execution_outputs.get("risks", [])
+                    if risk not in test_execution_result.risks
+                ],
+            ]
+            rerun_test_execution_next_actions = [
+                *test_execution_result.next_actions,
+                *[
+                    action
+                    for action in rerun_test_execution_outputs.get("next_actions", [])
+                    if action not in test_execution_result.next_actions
+                ],
+            ]
+            rerun_test_execution_metrics = {
+                **test_execution_result.metrics,
+                **(
+                    rerun_test_execution_outputs.get("metrics", {})
+                    if isinstance(rerun_test_execution_outputs.get("metrics"), dict)
+                    else {}
+                ),
+            }
+            effective_test_execution_result = AgentResult.success(
+                rerun_test_execution_task.notes[-1]
+                if rerun_test_execution_task.notes
+                else test_execution_result.summary,
+                outputs=rerun_test_execution_outputs,
+                artifacts=rerun_test_execution_artifacts,
+                risks=rerun_test_execution_risks,
+                next_actions=rerun_test_execution_next_actions,
+                metrics=rerun_test_execution_metrics,
+            )
+            rerun_review_artifacts = [
+                *review_result.artifacts,
+                *[
+                    artifact
+                    for artifact in rerun_review_outputs.get("artifacts", [])
+                    if artifact not in review_result.artifacts
+                ],
+            ]
+            rerun_review_risks = [
+                *review_result.risks,
+                *[
+                    risk
+                    for risk in rerun_review_outputs.get("risks", [])
+                    if risk not in review_result.risks
+                ],
+            ]
+            rerun_review_next_actions = [
+                *review_result.next_actions,
+                *[
+                    action
+                    for action in rerun_review_outputs.get("next_actions", [])
+                    if action not in review_result.next_actions
+                ],
+            ]
+            rerun_review_metrics = {
+                **review_result.metrics,
+                **(
+                    rerun_review_outputs.get("metrics", {})
+                    if isinstance(rerun_review_outputs.get("metrics"), dict)
+                    else {}
+                ),
+            }
+            effective_review_result = AgentResult.success(
+                rerun_review_task.notes[-1]
+                if rerun_review_task.notes
+                else review_result.summary,
+                outputs=rerun_review_outputs,
+                artifacts=rerun_review_artifacts,
+                risks=rerun_review_risks,
+                next_actions=rerun_review_next_actions,
+                metrics=rerun_review_metrics,
+            )
+
         self.edit_phase.apply_safe_edit_phase(
             state=state,
             requirement=requirement,
             requirements_result=requirements_result,
             planning_result=planning_result,
             documentation_result=documentation_result,
-            implementation_result=implementation_result,
+            implementation_result=effective_implementation_result,
             test_design_result=test_design_result,
-            test_execution_result=test_execution_result,
-            review_result=review_result,
+            test_execution_result=effective_test_execution_result,
+            review_result=effective_review_result,
             fix_result=fix_result,
         )
 
@@ -247,10 +376,10 @@ class SkeletonOrchestrator:
             requirements_result=requirements_result,
             planning_result=planning_result,
             documentation_result=documentation_result,
-            implementation_result=implementation_result,
+            implementation_result=effective_implementation_result,
             test_design_result=test_design_result,
-            test_execution_result=test_execution_result,
-            review_result=review_result,
+            test_execution_result=effective_test_execution_result,
+            review_result=effective_review_result,
             fix_result=fix_result,
             session_snapshot=snapshot,
         )
@@ -750,7 +879,7 @@ class SkeletonOrchestrator:
             requirements_result,
             planning_result,
             documentation_result,
-            implementation_result,
+            rerun_implementation_result,
             test_design_result,
             rerun_test_execution_result,
         )
