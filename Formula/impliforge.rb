@@ -3,7 +3,7 @@ class Impliforge < Formula
 
   desc "Orchestrator-centric multi-agent workflow runner built on the GitHub Copilot SDK"
   homepage "https://pypi.org/project/impliforge/"
-  url "https://github.com/rioriost/impliforge/releases/download/0.1.0/impliforge-0.1.0.tar.gz"
+  url "https://github.com/rioriost/impliforge/releases/download/0.1.1/impliforge-0.1.1.tar.gz"
   sha256 "f03f757eb5bb5fe66b52d1a5afdb713b82d6dd3bb285c53c66d247ef23ef0021"
   license "MIT"
 
