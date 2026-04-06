@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+main_module = importlib.import_module("devagents.main")
 from devagents.agents.base import AgentResult, AgentTask
-from devagents.main import SkeletonOrchestrator, build_parser
+from devagents.main import SkeletonOrchestrator, _run_cli, build_parser, main
 from devagents.models.routing import RoutingMode
 from devagents.orchestration.workflow import (
     TaskStatus,
@@ -881,3 +884,384 @@ def test_run_stops_after_failed_phase_and_skips_later_work(tmp_path: Path) -> No
     assert orchestrator.edit_phase.calls == []
     assert orchestrator.artifact_writer.workflow_calls == []
     assert len(orchestrator.session_manager.snapshot_calls) == 0
+
+
+def test_run_fix_loop_returns_failed_fix_result_without_reruns(tmp_path: Path) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    failed_fix_result = make_failure(
+        summary="fix failed",
+        outputs={"review": {"remaining": ["issue"]}},
+    )
+    rerun_calls: list[str] = []
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        assert state_arg is state
+        return failed_fix_result
+
+    async def fake_test_execution(*args: Any, **kwargs: Any) -> AgentResult:
+        rerun_calls.append("test_execution")
+        return make_result()
+
+    async def fake_review_phase(*args: Any, **kwargs: Any) -> AgentResult:
+        rerun_calls.append("review")
+        return make_result()
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(outputs={"normalized_requirements": {}}),
+            planning_result=make_result(outputs={"plan": {}}),
+            documentation_result=make_result(outputs={"documentation_bundle": {}}),
+            implementation_result=make_result(outputs={"implementation": {}}),
+            test_design_result=make_result(outputs={"test_plan": {}}),
+            test_execution_result=make_result(outputs={"test_results": {}}),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result is failed_fix_result
+    assert rerun_calls == []
+
+
+def test_run_fix_loop_returns_failed_rerun_test_result(tmp_path: Path) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    failed_rerun_test_result = make_failure(
+        summary="rerun tests failed",
+        outputs={"test_results": {"status": "failed"}},
+    )
+    review_calls: list[str] = []
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        assert state_arg is state
+        return make_result(summary="fix ready")
+
+    async def fake_test_execution(*args: Any, **kwargs: Any) -> AgentResult:
+        return failed_rerun_test_result
+
+    async def fake_review_phase(*args: Any, **kwargs: Any) -> AgentResult:
+        review_calls.append("review")
+        return make_result()
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(outputs={"normalized_requirements": {}}),
+            planning_result=make_result(outputs={"plan": {}}),
+            documentation_result=make_result(outputs={"documentation_bundle": {}}),
+            implementation_result=make_result(outputs={"implementation": {}}),
+            test_design_result=make_result(outputs={"test_plan": {}}),
+            test_execution_result=make_result(outputs={"test_results": {}}),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result is failed_rerun_test_result
+    assert review_calls == []
+
+
+def test_run_fix_loop_returns_failed_rerun_review_result(tmp_path: Path) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+
+    failed_rerun_review_result = make_failure(
+        summary="rerun review failed",
+        outputs={"review": {"fix_loop_required": True}},
+    )
+
+    async def fake_fix_phase(state_arg: Any, **kwargs: Any) -> AgentResult:
+        assert state_arg is state
+        return make_result(summary="fix ready")
+
+    async def fake_test_execution(*args: Any, **kwargs: Any) -> AgentResult:
+        return make_result(summary="tests rerun")
+
+    async def fake_review_phase(*args: Any, **kwargs: Any) -> AgentResult:
+        return failed_rerun_review_result
+
+    orchestrator._run_fix_phase = fake_fix_phase
+    orchestrator._run_test_execution_phase = fake_test_execution
+    orchestrator._run_review_phase = fake_review_phase
+
+    result = asyncio.run(
+        orchestrator._run_fix_loop(
+            state,
+            requirements_result=make_result(outputs={"normalized_requirements": {}}),
+            planning_result=make_result(outputs={"plan": {}}),
+            documentation_result=make_result(outputs={"documentation_bundle": {}}),
+            implementation_result=make_result(outputs={"implementation": {}}),
+            test_design_result=make_result(outputs={"test_plan": {}}),
+            test_execution_result=make_result(outputs={"test_results": {}}),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result is failed_rerun_review_result
+
+
+def test_run_fix_phase_persists_fix_report_and_note(tmp_path: Path) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+    orchestrator.fixer_agent = DummyAgent(
+        "fixer",
+        make_result(
+            summary="fix prepared",
+            outputs={
+                "fix_report": "# fix report",
+                "implementation": {"changes": ["x"]},
+            },
+        ),
+    )
+
+    requirements_result = make_result(
+        outputs={"normalized_requirements": {"objective": "x"}}
+    )
+    planning_result = make_result(outputs={"plan": {"steps": ["a"]}})
+    documentation_result = make_result(
+        outputs={"documentation_bundle": {"design_doc": "doc"}}
+    )
+    implementation_result = make_result(
+        outputs={"implementation": {"changes": ["base"]}}
+    )
+    test_design_result = make_result(outputs={"test_plan": {"cases": ["c1"]}})
+    test_execution_result = make_result(outputs={"test_results": {"status": "failed"}})
+    review_result = make_result(outputs={"review": {"fix_loop_required": True}})
+
+    result = asyncio.run(
+        orchestrator._run_fix_phase(
+            state,
+            requirements_result=requirements_result,
+            planning_result=planning_result,
+            documentation_result=documentation_result,
+            implementation_result=implementation_result,
+            test_design_result=test_design_result,
+            test_execution_result=test_execution_result,
+            review_result=review_result,
+        )
+    )
+
+    assert result.is_success is True
+    assert len(orchestrator.artifact_writer.text_calls) == 1
+    assert orchestrator.artifact_writer.text_calls[0]["output_key"] == "fix_report"
+    assert orchestrator.artifact_writer.text_calls[0]["target_name"] == "fix-report.md"
+    assert any("fix proposal を生成した。" in note for note in state.notes)
+
+    task = orchestrator.fixer_agent.calls[0]
+    assert task.name == "implementation"
+    assert task.inputs["normalized_requirements"] == {"objective": "x"}
+    assert task.inputs["plan"] == {"steps": ["a"]}
+    assert task.inputs["documentation_bundle"] == {"design_doc": "doc"}
+    assert task.inputs["implementation"] == {"changes": ["base"]}
+    assert task.inputs["test_plan"] == {"cases": ["c1"]}
+    assert task.inputs["test_results"] == {"status": "failed"}
+    assert task.inputs["review"] == {"fix_loop_required": True}
+    assert task.inputs["copilot_response"] == "copilot draft"
+
+
+def test_run_fix_phase_does_not_persist_report_on_failure(tmp_path: Path) -> None:
+    orchestrator = make_orchestrator(tmp_path)
+    state = make_state()
+    orchestrator.fixer_agent = DummyAgent(
+        "fixer",
+        make_failure(summary="fix failed", outputs={"fix_report": "# failed"}),
+    )
+
+    result = asyncio.run(
+        orchestrator._run_fix_phase(
+            state,
+            requirements_result=make_result(outputs={"normalized_requirements": {}}),
+            planning_result=make_result(outputs={"plan": {}}),
+            documentation_result=make_result(outputs={"documentation_bundle": {}}),
+            implementation_result=make_result(outputs={"implementation": {}}),
+            test_design_result=make_result(outputs={"test_plan": {}}),
+            test_execution_result=make_result(outputs={"test_results": {}}),
+            review_result=make_result(outputs={"review": {"fix_loop_required": True}}),
+        )
+    )
+
+    assert result.is_success is False
+    assert orchestrator.artifact_writer.text_calls == []
+    assert not any("fix proposal を生成した。" in note for note in state.notes)
+
+
+def test_run_cli_prints_summary_and_rotation_reason(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    state = make_state()
+    state.set_phase(WorkflowPhase.REVIEWING)
+    state.model = "gpt-5.4-mini"
+    state.add_artifact("artifacts/review-report.md")
+    state.update_task_status("requirements_analysis", TaskStatus.COMPLETED)
+    state.update_task_status("planning", TaskStatus.FAILED)
+
+    created: list[Any] = []
+
+    class FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            model: str,
+            artifacts_dir: Path,
+            docs_dir: Path,
+            routing_mode: RoutingMode,
+        ) -> None:
+            self.model = model
+            self.artifacts_dir = artifacts_dir
+            self.docs_dir = docs_dir
+            self.routing_mode = routing_mode
+            self.session_manager = DummySessionManager(should_rotate=True)
+            self.run_calls: list[dict[str, Any]] = []
+            created.append(self)
+
+        async def run(
+            self,
+            requirement: str,
+            *,
+            token_usage_ratio: float = 0.35,
+        ) -> Any:
+            self.run_calls.append(
+                {
+                    "requirement": requirement,
+                    "token_usage_ratio": token_usage_ratio,
+                }
+            )
+            return state
+
+    monkeypatch.setattr(main_module, "SkeletonOrchestrator", FakeOrchestrator)
+
+    exit_code = asyncio.run(
+        _run_cli(
+            requirement="Build a multi-agent workflow",
+            model="gpt-5.4",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            docs_dir=str(tmp_path / "docs"),
+            token_usage_ratio=0.72,
+            routing_mode=RoutingMode.COST_SAVER.value,
+        )
+    )
+
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert len(created) == 1
+    fake = created[0]
+    assert fake.run_calls == [
+        {
+            "requirement": "Build a multi-agent workflow",
+            "token_usage_ratio": 0.72,
+        }
+    ]
+    assert fake.session_manager.should_rotate_calls == [
+        {
+            "token_usage_ratio": 0.72,
+            "current_session_id": state.session_id,
+        }
+    ]
+    assert "workflow_id: wf-test-main" in captured
+    assert "phase: reviewing" in captured
+    assert "model: gpt-5.4-mini" in captured
+    assert "routing_mode: cost_saver" in captured
+    assert "task_summary:" in captured
+    assert "  - requirements_analysis: completed" in captured
+    assert "  - planning: failed" in captured
+    assert "session_id: sess-main" in captured
+    assert "rotate_session: True" in captured
+    assert "rotation_reason: threshold exceeded" in captured
+    assert "artifacts:" in captured
+    assert "  - artifacts/review-report.md" in captured
+
+
+def test_run_cli_omits_rotation_reason_when_empty(
+    monkeypatch: Any, tmp_path: Path, capsys: Any
+) -> None:
+    state = make_state()
+
+    class FakeOrchestrator:
+        def __init__(
+            self,
+            *,
+            model: str,
+            artifacts_dir: Path,
+            docs_dir: Path,
+            routing_mode: RoutingMode,
+        ) -> None:
+            self.session_manager = DummySessionManager(should_rotate=False)
+
+        async def run(
+            self,
+            requirement: str,
+            *,
+            token_usage_ratio: float = 0.35,
+        ) -> Any:
+            return state
+
+    monkeypatch.setattr(main_module, "SkeletonOrchestrator", FakeOrchestrator)
+
+    exit_code = asyncio.run(
+        _run_cli(
+            requirement="Build a multi-agent workflow",
+            model="gpt-5.4",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            docs_dir=str(tmp_path / "docs"),
+            token_usage_ratio=0.2,
+            routing_mode=RoutingMode.BALANCED.value,
+        )
+    )
+
+    captured = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert "rotate_session: False" in captured
+    assert "rotation_reason:" not in captured
+
+
+def test_main_parses_args_and_runs_cli(monkeypatch: Any) -> None:
+    parser_args = SimpleNamespace(
+        requirement="Ship feature",
+        model="gpt-5.4-mini",
+        artifacts_dir="custom-artifacts",
+        docs_dir="custom-docs",
+        token_usage_ratio=0.44,
+        routing_mode=RoutingMode.BALANCED.value,
+    )
+    run_cli_calls: list[dict[str, Any]] = []
+
+    class FakeParser:
+        def parse_args(self) -> Any:
+            return parser_args
+
+    async def fake_run_cli(**kwargs: Any) -> int:
+        run_cli_calls.append(kwargs)
+        return 7
+
+    monkeypatch.setattr(main_module, "build_parser", lambda: FakeParser())
+    monkeypatch.setattr(main_module, "_run_cli", fake_run_cli)
+    original_asyncio_run = asyncio.run
+    monkeypatch.setattr(
+        main_module.asyncio, "run", lambda coro: original_asyncio_run(coro)
+    )
+
+    exit_code = main()
+
+    assert exit_code == 7
+    assert run_cli_calls == [
+        {
+            "requirement": "Ship feature",
+            "model": "gpt-5.4-mini",
+            "artifacts_dir": "custom-artifacts",
+            "docs_dir": "custom-docs",
+            "token_usage_ratio": 0.44,
+            "routing_mode": RoutingMode.BALANCED.value,
+        }
+    ]
