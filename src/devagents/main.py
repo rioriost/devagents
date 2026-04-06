@@ -1193,7 +1193,10 @@ def build_parser() -> argparse.ArgumentParser:
         prog="devagents",
         description="Run the devagents multi-agent workflow.",
     )
-    parser.add_argument("requirement", help="Requirement text to process.")
+    parser.add_argument(
+        "requirement_file",
+        help="Path to a file containing the requirement text to process.",
+    )
     parser.add_argument(
         "--model",
         default=DEFAULT_MODEL,
@@ -1225,13 +1228,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def _run_cli(
-    requirement: str,
+    requirement_file: str,
     model: str,
     artifacts_dir: str,
     docs_dir: str,
     token_usage_ratio: float,
     routing_mode: str,
 ) -> int:
+    requirement_path = Path(requirement_file)
+
+    try:
+        requirement = requirement_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        print(f"error: requirement file not found: {requirement_path}")
+        return 1
+    except OSError as exc:
+        print(f"error: failed to read requirement file {requirement_path}: {exc}")
+        return 1
+
+    if not requirement:
+        print(f"error: requirement file is empty: {requirement_path}")
+        return 1
+
     orchestrator = SkeletonOrchestrator(
         model=model,
         artifacts_dir=Path(artifacts_dir),
@@ -1251,6 +1269,7 @@ async def _run_cli(
     print(f"phase: {state.phase.value}")
     print(f"model: {state.model}")
     print(f"routing_mode: {routing_mode}")
+    print(f"requirement_file: {requirement_path}")
     print("task_summary:")
     for task in state.tasks:
         print(f"  - {task.task_id}: {task.status.value}")
@@ -1270,7 +1289,7 @@ def main() -> int:
     args = parser.parse_args()
     return asyncio.run(
         _run_cli(
-            requirement=args.requirement,
+            requirement_file=args.requirement_file,
             model=args.model,
             artifacts_dir=args.artifacts_dir,
             docs_dir=args.docs_dir,

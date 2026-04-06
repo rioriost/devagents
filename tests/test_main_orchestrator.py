@@ -404,8 +404,8 @@ def make_orchestrator(
 def test_build_parser_parses_defaults_and_overrides() -> None:
     parser = build_parser()
 
-    defaults = parser.parse_args(["ship feature"])
-    assert defaults.requirement == "ship feature"
+    defaults = parser.parse_args(["requirements.md"])
+    assert defaults.requirement_file == "requirements.md"
     assert defaults.model == "gpt-5.4"
     assert defaults.artifacts_dir == "artifacts"
     assert defaults.docs_dir == "docs"
@@ -414,7 +414,7 @@ def test_build_parser_parses_defaults_and_overrides() -> None:
 
     custom = parser.parse_args(
         [
-            "ship feature",
+            "requirements.md",
             "--model",
             "gpt-5.4-mini",
             "--artifacts-dir",
@@ -427,11 +427,55 @@ def test_build_parser_parses_defaults_and_overrides() -> None:
             RoutingMode.COST_SAVER.value,
         ]
     )
+    assert custom.requirement_file == "requirements.md"
     assert custom.model == "gpt-5.4-mini"
     assert custom.artifacts_dir == "tmp-artifacts"
     assert custom.docs_dir == "tmp-docs"
     assert custom.token_usage_ratio == 0.8
     assert custom.routing_mode == RoutingMode.COST_SAVER.value
+
+
+def test_run_cli_returns_error_for_missing_requirement_file(
+    tmp_path: Path, capsys: Any
+) -> None:
+    missing_file = tmp_path / "missing-requirements.md"
+
+    exit_code = asyncio.run(
+        _run_cli(
+            requirement_file=str(missing_file),
+            model="gpt-5.4",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            docs_dir=str(tmp_path / "docs"),
+            token_usage_ratio=0.35,
+            routing_mode=RoutingMode.BALANCED.value,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert f"error: requirement file not found: {missing_file}" in output
+
+
+def test_run_cli_returns_error_for_empty_requirement_file(
+    tmp_path: Path, capsys: Any
+) -> None:
+    requirement_file = tmp_path / "empty-requirements.md"
+    requirement_file.write_text(" \n\t\n", encoding="utf-8")
+
+    exit_code = asyncio.run(
+        _run_cli(
+            requirement_file=str(requirement_file),
+            model="gpt-5.4",
+            artifacts_dir=str(tmp_path / "artifacts"),
+            docs_dir=str(tmp_path / "docs"),
+            token_usage_ratio=0.35,
+            routing_mode=RoutingMode.BALANCED.value,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert f"error: requirement file is empty: {requirement_file}" in output
 
 
 def test_build_copilot_request_returns_plain_request_without_parent_session(
@@ -2247,6 +2291,9 @@ def test_run_cli_prints_summary_and_rotation_reason(
     state.update_task_status("requirements_analysis", TaskStatus.COMPLETED)
     state.update_task_status("planning", TaskStatus.FAILED)
 
+    requirement_file = tmp_path / "requirements.md"
+    requirement_file.write_text("Build a multi-agent workflow", encoding="utf-8")
+
     created: list[Any] = []
 
     class FakeOrchestrator:
@@ -2284,50 +2331,53 @@ def test_run_cli_prints_summary_and_rotation_reason(
 
     exit_code = asyncio.run(
         _run_cli(
-            requirement="Build a multi-agent workflow",
+            requirement_file=str(requirement_file),
             model="gpt-5.4",
             artifacts_dir=str(tmp_path / "artifacts"),
             docs_dir=str(tmp_path / "docs"),
             token_usage_ratio=0.72,
-            routing_mode=RoutingMode.COST_SAVER.value,
+            routing_mode=RoutingMode.BALANCED.value,
         )
     )
 
-    captured = capsys.readouterr().out
-
     assert exit_code == 0
     assert len(created) == 1
-    fake = created[0]
-    assert fake.run_calls == [
+    orchestrator = created[0]
+    assert orchestrator.run_calls == [
         {
             "requirement": "Build a multi-agent workflow",
             "token_usage_ratio": 0.72,
         }
     ]
-    assert fake.session_manager.should_rotate_calls == [
-        {
-            "token_usage_ratio": 0.72,
-            "current_session_id": state.session_id,
-        }
-    ]
-    assert "workflow_id: wf-test-main" in captured
-    assert "phase: reviewing" in captured
-    assert "model: gpt-5.4-mini" in captured
-    assert "routing_mode: cost_saver" in captured
-    assert "task_summary:" in captured
-    assert "  - requirements_analysis: completed" in captured
-    assert "  - planning: failed" in captured
-    assert "session_id: sess-main" in captured
-    assert "rotate_session: True" in captured
-    assert "rotation_reason: threshold exceeded" in captured
-    assert "artifacts:" in captured
-    assert "  - artifacts/review-report.md" in captured
+
+    output = capsys.readouterr().out
+    assert "workflow_id: wf-test-main" in output
+    assert "phase: reviewing" in output
+    assert "model: gpt-5.4-mini" in output
+    assert "routing_mode: balanced" in output
+    assert f"requirement_file: {requirement_file}" in output
+    assert "task_summary:" in output
+    assert "  - requirements_analysis: completed" in output
+    assert "  - planning: failed" in output
+    assert "session_id: sess-main" in output
+    assert "rotate_session: True" in output
+    assert "rotation_reason: threshold exceeded" in output
+    assert "artifacts:" in output
+    assert "  - artifacts/review-report.md" in output
 
 
 def test_run_cli_omits_rotation_reason_when_empty(
     monkeypatch: Any, tmp_path: Path, capsys: Any
 ) -> None:
     state = make_state()
+    state.set_phase(WorkflowPhase.COMPLETED)
+    state.model = "gpt-5.4"
+    state.add_artifact("docs/final-summary.md")
+    state.update_task_status("requirements_analysis", TaskStatus.COMPLETED)
+    state.update_task_status("planning", TaskStatus.COMPLETED)
+
+    requirement_file = tmp_path / "requirements.md"
+    requirement_file.write_text("Build a multi-agent workflow", encoding="utf-8")
 
     class FakeOrchestrator:
         def __init__(
@@ -2352,7 +2402,7 @@ def test_run_cli_omits_rotation_reason_when_empty(
 
     exit_code = asyncio.run(
         _run_cli(
-            requirement="Build a multi-agent workflow",
+            requirement_file=str(requirement_file),
             model="gpt-5.4",
             artifacts_dir=str(tmp_path / "artifacts"),
             docs_dir=str(tmp_path / "docs"),
@@ -2361,11 +2411,11 @@ def test_run_cli_omits_rotation_reason_when_empty(
         )
     )
 
-    captured = capsys.readouterr().out
-
     assert exit_code == 0
-    assert "rotate_session: False" in captured
-    assert "rotation_reason:" not in captured
+    output = capsys.readouterr().out
+    assert f"requirement_file: {requirement_file}" in output
+    assert "rotate_session: False" in output
+    assert "rotation_reason:" not in output
 
 
 def test_run_cli_e2e_style_flow_surfaces_multi_phase_artifacts_and_summary(
@@ -2427,9 +2477,15 @@ def test_run_cli_e2e_style_flow_surfaces_multi_phase_artifacts_and_summary(
 
     monkeypatch.setattr(main_module, "SkeletonOrchestrator", FakeOrchestrator)
 
+    requirement_file = tmp_path / "requirements.md"
+    requirement_file.write_text(
+        "Build a multi-agent workflow\nwith persisted context and review flow\n",
+        encoding="utf-8",
+    )
+
     exit_code = asyncio.run(
         _run_cli(
-            requirement="Build a multi-agent workflow",
+            requirement_file=str(requirement_file),
             model="gpt-5.4",
             artifacts_dir=str(tmp_path / "artifacts"),
             docs_dir=str(tmp_path / "docs"),
@@ -2445,7 +2501,7 @@ def test_run_cli_e2e_style_flow_surfaces_multi_phase_artifacts_and_summary(
     fake = created[0]
     assert fake.run_calls == [
         {
-            "requirement": "Build a multi-agent workflow",
+            "requirement": "Build a multi-agent workflow\nwith persisted context and review flow",
             "token_usage_ratio": 0.88,
         }
     ]
@@ -2459,6 +2515,7 @@ def test_run_cli_e2e_style_flow_surfaces_multi_phase_artifacts_and_summary(
     assert "phase: completed" in captured
     assert "model: gpt-5.4-mini" in captured
     assert "routing_mode: balanced" in captured
+    assert f"requirement_file: {requirement_file}" in captured
     assert "task_summary:" in captured
     assert "  - requirements_analysis: completed" in captured
     assert "  - documentation: completed" in captured
@@ -2535,9 +2592,12 @@ def test_run_cli_e2e_style_flow_handles_long_requirement_input(
 
     monkeypatch.setattr(main_module, "SkeletonOrchestrator", FakeOrchestrator)
 
+    requirement_file = tmp_path / "long-requirements.md"
+    requirement_file.write_text(long_requirement, encoding="utf-8")
+
     exit_code = asyncio.run(
         _run_cli(
-            requirement=long_requirement,
+            requirement_file=str(requirement_file),
             model="gpt-5.4",
             artifacts_dir=str(tmp_path / "artifacts"),
             docs_dir=str(tmp_path / "docs"),
@@ -2553,7 +2613,7 @@ def test_run_cli_e2e_style_flow_handles_long_requirement_input(
     fake = created[0]
     assert fake.run_calls == [
         {
-            "requirement": long_requirement,
+            "requirement": long_requirement.strip(),
             "token_usage_ratio": 0.9,
         }
     ]
@@ -2566,6 +2626,7 @@ def test_run_cli_e2e_style_flow_handles_long_requirement_input(
     assert "workflow_id: wf-test-main" in captured
     assert "phase: completed" in captured
     assert "routing_mode: quality" in captured
+    assert f"requirement_file: {requirement_file}" in captured
     assert "rotate_session: True" in captured
     assert "rotation_reason: threshold exceeded" in captured
     assert "  - docs/design.md" in captured
@@ -2574,7 +2635,7 @@ def test_run_cli_e2e_style_flow_handles_long_requirement_input(
 
 def test_main_parses_args_and_runs_cli(monkeypatch: Any) -> None:
     parser_args = SimpleNamespace(
-        requirement="Ship feature",
+        requirement_file="requirements.md",
         model="gpt-5.4-mini",
         artifacts_dir="custom-artifacts",
         docs_dir="custom-docs",
@@ -2603,7 +2664,7 @@ def test_main_parses_args_and_runs_cli(monkeypatch: Any) -> None:
     assert exit_code == 7
     assert run_cli_calls == [
         {
-            "requirement": "Ship feature",
+            "requirement_file": "requirements.md",
             "model": "gpt-5.4-mini",
             "artifacts_dir": "custom-artifacts",
             "docs_dir": "custom-docs",

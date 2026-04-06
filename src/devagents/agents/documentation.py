@@ -236,7 +236,7 @@ class DocumentationAgent(BaseAgent):
             [
                 "",
                 "## Operator Checklist",
-                "- Confirm requirement text is finalized",
+                "- Confirm the requirement file path is finalized and points to the intended input document",
                 "- Confirm session snapshot and workflow state are persisted",
                 "- Confirm generated docs are reviewed before implementation",
                 "- Confirm unresolved questions are either answered or explicitly deferred",

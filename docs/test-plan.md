@@ -86,16 +86,16 @@ GitHub Copilot SDKを用いたマルチエージェント環境を構築する
   - assertion: Explicitly deferred open questions are distinguished from unresolved ones
 
 ## Fixtures and Data
-- Sample requirement text for a Copilot SDK multi-agent workflow
-- Long requirement text fixture for non-functional and CLI quality-mode scenarios
+- Sample requirement file for a Copilot SDK multi-agent workflow
+- Long requirement file fixture for non-functional and CLI quality-mode scenarios
 - Temporary artifacts directory for workflow-state, session snapshots, and run summaries
 - Deterministic routing mode input such as quality/balanced/cost_saver
 - Mocked or dry-run Copilot response payloads for repeatable validation
 - Review outputs with blocking issues, resolved decisions, deferred open questions, and unresolved open questions
 
 ## Validation Commands
-- uv run python -m devagents "sample requirement" --routing-mode quality
-- uv run python -m devagents "sample requirement" --token-usage-ratio 0.9
+- uv run python -m devagents requirements/sample-requirement.md --routing-mode quality
+- uv run python -m devagents requirements/sample-requirement.md --token-usage-ratio 0.9
 - uv run pytest -q tests
 - uv run pytest --cov=src/devagents --cov-report=term-missing:skip-covered -q tests
 

@@ -123,7 +123,7 @@ def test_run_builds_test_plan_document_and_metrics() -> None:
     assert "## Acceptance Criteria Coverage\n- Artifacts are persisted" in document
     assert "## Test Cases\n- `unit-routing-selection` (unit):" in document
     assert "  - assertion: ModelRouter returns a selected_model" in document
-    assert "## Fixtures and Data\n- Sample requirement text" in document
+    assert "## Fixtures and Data\n- Sample requirement file" in document
     assert (
         "## Environment Assumptions\n"
         "- Use `uv run` so execution uses the repository-managed Python environment\n"
@@ -131,7 +131,12 @@ def test_run_builds_test_plan_document_and_metrics() -> None:
         "- If `working_directory` or `config_dir` is configured, each path must already exist as a directory before SDK execution\n"
         in document
     )
-    assert "## Validation Commands\n- uv run python -m devagents" in document
+    assert (
+        "## Validation Commands\n"
+        "- uv run python -m devagents requirements/sample-requirement.md --routing-mode quality\n"
+        "- uv run python -m devagents requirements/sample-requirement.md --token-usage-ratio 0.9\n"
+        in document
+    )
     assert (
         "## Operator Environment Signals\n"
         "- Record the selected routing mode in operator-facing outputs\n"

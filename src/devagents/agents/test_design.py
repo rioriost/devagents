@@ -72,7 +72,7 @@ class TestDesignAgent(BaseAgent):
                 open_questions=open_questions,
             ),
             "fixtures_and_data": [
-                "Sample requirement text for a Copilot SDK multi-agent workflow",
+                "Sample requirement file for a Copilot SDK multi-agent workflow",
                 "Temporary artifacts directory for workflow-state and session snapshots",
                 "Deterministic routing mode input such as quality/balanced/cost_saver",
                 "Mocked or dry-run Copilot response payloads for repeatable validation",
@@ -83,8 +83,8 @@ class TestDesignAgent(BaseAgent):
                 "If `working_directory` or `config_dir` is configured, each path must already exist as a directory before SDK execution",
             ],
             "validation_commands": [
-                'uv run python -m devagents "sample requirement" --routing-mode quality',
-                'uv run python -m devagents "sample requirement" --token-usage-ratio 0.9',
+                "uv run python -m devagents requirements/sample-requirement.md --routing-mode quality",
+                "uv run python -m devagents requirements/sample-requirement.md --token-usage-ratio 0.9",
             ],
             "operator_environment_signals": [
                 "Record the selected routing mode in operator-facing outputs",
